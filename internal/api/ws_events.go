@@ -34,7 +34,22 @@ type vsiOutMsg struct {
 	Data      interface{} `json:"data,omitempty"`
 }
 
-const vsiBufSize = 256
+// isDropLogThreshold returns true when n is a power of ten (1, 10, 100, …).
+// Used to throttle the buffer-full warning: emit on first drop and on every
+// 10× scale-up, keeping log volume bounded under sustained backpressure
+// while still surfacing each escalation.
+func isDropLogThreshold(n int64) bool {
+	if n <= 0 {
+		return false
+	}
+	for n > 1 {
+		if n%10 != 0 {
+			return false
+		}
+		n /= 10
+	}
+	return true
+}
 
 func (s *Server) vsi(w http.ResponseWriter, r *http.Request) {
 	// Parse optional app_id regex filter before upgrade so we can reject with 400.
@@ -58,7 +73,8 @@ func (s *Server) vsi(w http.ResponseWriter, r *http.Request) {
 	connectedAt := time.Now()
 
 	var dropped atomic.Int64
-	ch := make(chan events.Event, vsiBufSize)
+	bufSize := s.Config.VSIEventBufferSize
+	ch := make(chan events.Event, bufSize)
 	unsub := s.Bus.Subscribe(func(e events.Event) {
 		if appFilter != nil && !appFilter.MatchString(e.Data.GetAppID()) {
 			return
@@ -66,7 +82,17 @@ func (s *Server) vsi(w http.ResponseWriter, r *http.Request) {
 		select {
 		case ch <- e:
 		default:
-			dropped.Add(1)
+			// Buffer full → drop. Log on the leading edge of a drop burst
+			// (transition from 0 → 1) and on each power-of-10 threshold so
+			// sustained backpressure is visible without flooding the log.
+			n := dropped.Add(1)
+			if isDropLogThreshold(n) {
+				s.Log.Warn("vsi: event buffer full, dropping event",
+					"event_type", e.Type,
+					"buffer_size", bufSize,
+					"dropped_in_burst", n,
+				)
+			}
 		}
 	})
 	defer unsub()

@@ -1844,13 +1844,22 @@ The WebSocket accepts bidirectional commands using the same naming as the REST A
 | `add_leg_to_room` | `{"room_id":"...","leg_id":"..."}` | Add or move leg to room (supports `mute`, `deaf`, `accept_dtmf`) |
 | `remove_leg_from_room` | `{"room_id":"...","leg_id":"..."}` | Remove leg from room |
 
-The server sends application-level pings every 30 seconds. If a client reads too slowly, events are buffered (up to 256). When the buffer is full, events are dropped and the server sends a notification before the next successfully delivered event:
+The server sends application-level pings every 30 seconds. If a client reads too slowly, events are buffered per-connection. When the buffer is full, **new events are dropped** and the server sends a notification before the next successfully delivered event:
 
 ```json
 {"type": "events_dropped", "count": 12}
 ```
 
 On receiving this, the client should resync state via REST (e.g. `GET /v1/legs`, `GET /v1/rooms`) since it may have missed transitions.
+
+The per-connection buffer size defaults to **256 events** and is configurable via the `VSI_EVENT_BUFFER_SIZE` environment variable (clamped to `[16, 1_000_000]`). Operators see a warn log (`vsi: event buffer full, dropping event`) on the first drop in a burst and on each 10× escalation, so sustained drops are visible without flooding the log.
+
+**Tuning the buffer.** Larger buffers absorb longer back-pressure spikes but trade off:
+- **Memory:** ~1 KB per slot at typical event sizes; e.g. 256 → ~256 KB per client, 10_000 → ~10 MB per client. Multiply by your concurrent VSI client count.
+- **Latency:** when a slow client catches up, every event in the buffer is delivered before any new one — a 10_000-deep buffer means the client may see events that are tens of seconds old. The 30s ping is unaffected (sent on a separate goroutine), but the application's view of "now" can lag.
+- **Failure radius:** with a small buffer you drop fast and resync fast; with a large buffer the client stays "almost caught up" for longer before giving up.
+
+The default of 256 is sized for healthy clients on a normal event stream (one inbound call generates ~10 events). Increase only when you have a legitimate slow-consumer scenario you can't fix at the client.
 
 **Example:**
 

@@ -46,6 +46,7 @@ type Config struct {
 	SIPJitterBufferMaxMs   int
 	SIPReferAutoDial       bool
 	SIPAutoRinging         bool
+	VSIEventBufferSize     int
 	DefaultSampleRate      int
 	SpeechDetectionEnabled bool
 }
@@ -93,9 +94,29 @@ func Load() Config {
 		SIPJitterBufferMaxMs:   envInt("SIP_JITTER_BUFFER_MAX_MS", 300),
 		SIPReferAutoDial:       os.Getenv("SIP_REFER_AUTO_DIAL") == "true",
 		SIPAutoRinging:         os.Getenv("SIP_AUTO_RINGING") == "true",
+		VSIEventBufferSize:     vsiBufferSize(envInt("VSI_EVENT_BUFFER_SIZE", 256)),
 		DefaultSampleRate:      defaultRate,
 		SpeechDetectionEnabled: os.Getenv("SPEECH_DETECTION_ENABLED") == "true",
 	}
+}
+
+// vsiBufferSize clamps the VSI per-client event buffer to a sane range.
+// Below 16 the channel can't absorb even a small burst (one inbound call
+// produces ~10 events). The upper bound exists only to guard against
+// pathological config — at 1M slots the per-client memory footprint reaches
+// roughly 100 MB at typical event sizes.
+func vsiBufferSize(n int) int {
+	const (
+		minSize = 16
+		maxSize = 1_000_000
+	)
+	if n < minSize {
+		return minSize
+	}
+	if n > maxSize {
+		return maxSize
+	}
+	return n
 }
 
 func envInt(key string, def int) int {
