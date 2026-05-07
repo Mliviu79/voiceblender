@@ -504,6 +504,96 @@ paths:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/Error'
+    /legs/{id}/rtt:
+        parameters:
+            - $ref: '#/components/parameters/LegId'
+        post:
+            operationId: sendRTT
+            summary: Send Real-Time Text (T.140) on a SIP leg
+            description: Sends UTF-8 text on the leg's RTT (T.140 / RFC 4103) media stream. Requires that the SDP offer/answer agreed on an m=text section with the remote UA. Enable RTT on the server with RTT_ENABLED=true.
+            tags:
+                - Legs
+            requestBody:
+                required: true
+                content:
+                    application/json:
+                        schema:
+                            $ref: '#/components/schemas/RTTRequest'
+            responses:
+                '200':
+                    description: Text sent
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/StatusResponse'
+                '400':
+                    description: Invalid JSON or empty text
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                '404':
+                    description: Leg not found
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                '409':
+                    description: RTT was not negotiated for this leg
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+                '500':
+                    description: Send failed
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+    /legs/{id}/rtt/accept:
+        parameters:
+            - $ref: '#/components/parameters/LegId'
+        post:
+            operationId: acceptRTTLeg
+            summary: Enable RTT reception on a leg
+            description: Allow this leg to receive RTT text broadcast from other legs in the same room and to emit rtt.received events for incoming text. Default state for new legs.
+            tags:
+                - Legs
+            responses:
+                '200':
+                    description: RTT reception enabled
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/StatusResponse'
+                '404':
+                    description: Leg not found
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
+    /legs/{id}/rtt/reject:
+        parameters:
+            - $ref: '#/components/parameters/LegId'
+        post:
+            operationId: rejectRTTLeg
+            summary: Disable RTT reception on a leg
+            description: Block this leg from receiving RTT text broadcast from other legs in the same room and suppress rtt.received events for this leg.
+            tags:
+                - Legs
+            responses:
+                '200':
+                    description: RTT reception disabled
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/StatusResponse'
+                '404':
+                    description: Leg not found
+                    content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/Error'
     /legs/{id}/play:
         parameters:
             - $ref: '#/components/parameters/LegId'
@@ -2363,6 +2453,14 @@ components:
                     - mime_type
                 - required:
                     - tone
+        RTTRequest:
+            type: object
+            properties:
+                text:
+                    type: string
+                    description: UTF-8 text to send. May be one or more characters and may include T.140 control codes (e.g. backspace U+0008, CR/LF).
+            required:
+                - text
         RecordingRequest:
             type: object
             properties:
@@ -2582,6 +2680,7 @@ components:
                 - leg.hold
                 - leg.unhold
                 - dtmf.received
+                - rtt.received
                 - speaking.started
                 - speaking.stopped
                 - playback.started
@@ -2919,6 +3018,30 @@ x-webhooks:
                                         description: DTMF digit received
                                     seq:
                                         type: integer
+    rtt.received:
+        post:
+            summary: Real-Time Text (T.140 / RFC 4103) chunk received from the remote
+            requestBody:
+                content:
+                    application/json:
+                        schema:
+                            allOf:
+                                - $ref: '#/components/schemas/WebhookEvent'
+                                - properties:
+                                    leg_id:
+                                        type: string
+                                        description: Leg identifier
+                                    app_id:
+                                        type: string
+                                    text:
+                                        type: string
+                                        description: UTF-8 text chunk received from the remote
+                                    seq:
+                                        type: integer
+                                        description: Per-leg monotonic sequence (independent of RTP sequence numbers)
+                                    loss_marker:
+                                        type: boolean
+                                        description: True when a U+FFFD has been prepended to indicate text was lost beyond what RFC 2198 redundancy could recover
     speaking.started:
         post:
             summary: Participant started speaking

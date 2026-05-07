@@ -610,6 +610,7 @@ func allWebhookEvents() []webhookEventMeta {
 		{events.LegHold, "Leg put on hold (local or remote)", reflect.TypeOf(events.LegHoldData{})},
 		{events.LegUnhold, "Leg taken off hold (local or remote)", reflect.TypeOf(events.LegUnholdData{})},
 		{events.DTMFReceived, "DTMF digit received", reflect.TypeOf(events.DTMFReceivedData{})},
+		{events.RTTReceived, "Real-Time Text (T.140 / RFC 4103) chunk received from the remote", reflect.TypeOf(events.RTTReceivedData{})},
 		{events.SpeakingStarted, "Participant started speaking", reflect.TypeOf(events.SpeakingData{})},
 		{events.SpeakingStopped, "Participant stopped speaking", reflect.TypeOf(events.SpeakingData{})},
 		{events.PlaybackStarted, "Playback began", reflect.TypeOf(events.PlaybackStartedData{})},

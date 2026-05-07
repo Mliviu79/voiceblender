@@ -731,6 +731,18 @@ func (s *Server) createSIPOutboundLeg(w http.ResponseWriter, r *http.Request, re
 		s.broadcastDTMF(l.ID(), digit)
 	})
 
+	var rttSeq atomic.Uint64
+	l.OnTextReceived(func(text string, lossMarker bool) {
+		seq := rttSeq.Add(1)
+		s.Bus.Publish(events.RTTReceived, &events.RTTReceivedData{
+			LegScope:   events.LegScope{LegID: l.ID(), AppID: l.AppID()},
+			Text:       text,
+			Seq:        seq,
+			LossMarker: lossMarker,
+		})
+		s.broadcastRTT(l.ID(), text)
+	})
+
 	l.OnRTPTimeout(func() {
 		if l.State() != leg.StateHungUp {
 			s.cleanupLeg(l)
@@ -774,6 +786,11 @@ func (s *Server) createSIPOutboundLeg(w http.ResponseWriter, r *http.Request, re
 	if req.Auth != nil {
 		inviteOpts.AuthUsername = req.Auth.Username
 		inviteOpts.AuthPassword = req.Auth.Password
+	}
+	if s.Config.RTTEnabled {
+		inviteOpts.RTTEnabled = true
+		inviteOpts.RTTRedundancy = s.Config.RTTRedundancyLevel
+		l.SetRTTConfig(true, s.Config.RTTRedundancyLevel, s.Config.RTTBufferMs)
 	}
 	inviteOpts.OnEarlyMedia = func(remoteSDP *sipmod.SDPMedia, rtpSess *sipmod.RTPSession) {
 		if err := l.SetupEarlyMediaOutbound(remoteSDP, rtpSess); err != nil {
@@ -918,6 +935,7 @@ func (s *Server) HandleInboundCall(call *sipmod.InboundCall) {
 	// override for inbound: inbound tuning is operator-driven via the
 	// SIP_JITTER_BUFFER_MS env var.
 	l.SetJitterBuffer(s.Config.SIPJitterBufferMs, s.Config.SIPJitterBufferMaxMs)
+	l.SetRTTConfig(s.Config.RTTEnabled, s.Config.RTTRedundancyLevel, s.Config.RTTBufferMs)
 
 	// Route events for this leg to the per-leg webhook. Extract URL from SIP
 	// X-Webhook-URL header, falling back to the configured default.
@@ -965,6 +983,18 @@ func (s *Server) HandleInboundCall(call *sipmod.InboundCall) {
 				Seq:      seq,
 			})
 			s.broadcastDTMF(l.ID(), digit)
+		})
+
+		var rttSeq atomic.Uint64
+		l.OnTextReceived(func(text string, lossMarker bool) {
+			seq := rttSeq.Add(1)
+			s.Bus.Publish(events.RTTReceived, &events.RTTReceivedData{
+				LegScope:   events.LegScope{LegID: l.ID(), AppID: l.AppID()},
+				Text:       text,
+				Seq:        seq,
+				LossMarker: lossMarker,
+			})
+			s.broadcastRTT(l.ID(), text)
 		})
 
 		l.OnRTPTimeout(func() {

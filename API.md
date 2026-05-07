@@ -567,6 +567,72 @@ curl -X POST http://localhost:8080/v1/legs/abc-123/dtmf/reject
 
 ---
 
+### Real-Time Text (RTT, ITU-T T.140 / RFC 4103)
+
+VoiceBlender can negotiate an `m=text` media line alongside `m=audio` on SIP legs and exchange UTF-8 text in real time using the RFC 4103 RTP payload with optional RFC 2198 redundancy. Useful for accessibility (deaf / hard-of-hearing callers) and totally-conversational compliance scenarios.
+
+RTT is **disabled by default**. Enable it server-wide by setting `RTT_ENABLED=true` (see Configuration). When enabled:
+
+- Every outbound INVITE offers an `m=text` section with `t140/1000` and `red/1000` payload types.
+- Every inbound INVITE that carries an `m=text` offer is answered with a matching section.
+- Peers that don't speak RFC 4103 simply ignore or reject the section; audio still negotiates normally.
+
+WebRTC legs do not currently bridge RTT (browsers use RFC 8865 over data channels rather than RFC 4103 over RTP).
+
+---
+
+### POST /v1/legs/{id}/rtt
+
+Send a chunk of UTF-8 text on the leg's RTT stream. Requires that the SDP exchange agreed on `m=text`.
+
+**Request:**
+
+```json
+{ "text": "hello\n" }
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `text` | string | yes | UTF-8 text. May include T.140 control codes such as backspace (``) or CR/LF. |
+
+**Response:** `200 OK`
+
+```json
+{ "status": "sent" }
+```
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:8080/v1/legs/abc-123/rtt \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"hello"}'
+```
+
+**Errors:**
+- `400` — Invalid JSON or empty text
+- `404` — Leg not found
+- `409` — RTT was not negotiated for this leg (peer didn't include `m=text`, or `RTT_ENABLED=false`)
+- `500` — Send failed
+
+---
+
+### POST /v1/legs/{id}/rtt/accept
+
+Allow this leg to receive RTT text broadcast from other legs in the same room and to emit `rtt.received` events. Default for new legs.
+
+**Response:** `200 OK { "status": "rtt_accepting" }`
+
+---
+
+### POST /v1/legs/{id}/rtt/reject
+
+Block this leg from receiving RTT text broadcast from other legs and suppress `rtt.received` events for it.
+
+**Response:** `200 OK { "status": "rtt_rejecting" }`
+
+---
+
 ### POST /v1/legs/{id}/play
 
 Start audio playback to a leg. Fetches audio from a URL or generates a built-in telephone tone.
@@ -2085,6 +2151,7 @@ All event data uses typed structs with consistent field names. Events scoped to 
 | `leg.transfer_completed` | Transfer reached terminal 2xx; leg is hung up | `leg_id`, `status_code`, `reason` |
 | `leg.transfer_failed` | Transfer ended in non-2xx or local error | `leg_id`, `status_code`, `reason`, `error` |
 | `dtmf.received` | DTMF digit received | `leg_id`, `digit`, `seq` |
+| `rtt.received` | RTT (T.140 / RFC 4103) text chunk received | `leg_id`, `text`, `seq`, `loss_marker` |
 | `speaking.started` | Participant started speaking | `leg_id`, `room_id` (if in a room) |
 | `speaking.stopped` | Participant stopped speaking | `leg_id`, `room_id` (if in a room) |
 

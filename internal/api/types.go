@@ -249,6 +249,15 @@ var dtmfRequestFields = map[string]FieldEnrichment{
 	"digits": {Description: "DTMF digits to send (0-9, *, #)"},
 }
 
+// RTTRequest is the request body for POST /v1/legs/{id}/rtt.
+type RTTRequest struct {
+	Text string `json:"text"`
+}
+
+var rttRequestFields = map[string]FieldEnrichment{
+	"text": {Description: "UTF-8 text to send. May be one or more characters and may include T.140 control codes (e.g. backspace U+0008, CR/LF)."},
+}
+
 // TTSRequest is the request body for POST /v1/legs/{id}/tts and POST /v1/rooms/{id}/tts.
 type TTSRequest struct {
 	Text     string `json:"text"`
@@ -413,6 +422,7 @@ func SchemaEnrichments() map[string]FieldEnrichment {
 	collect("PlaybackRequest", playbackRequestFields)
 	collect("VolumeRequest", volumeRequestFields)
 	collect("DTMFRequest", dtmfRequestFields)
+	collect("RTTRequest", rttRequestFields)
 	collect("TTSRequest", ttsRequestFields)
 	collect("STTRequest", sttRequestFields)
 	collect("RecordRequest", recordRequestFields)

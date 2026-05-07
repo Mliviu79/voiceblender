@@ -207,6 +207,10 @@ type OutboundCall struct {
 	RemoteSDP *SDPMedia
 	RTPSess   *RTPSession
 
+	// Optional RTT (T.140 / RFC 4103) media. Populated when the remote's
+	// answer accepts the offered m=text section. Nil otherwise.
+	TextRTPSess *RTPSession
+
 	// Session timer (RFC 4028) — populated when remote's 200 OK includes timers.
 	SessionTimer *SessionTimerParams // nil when remote didn't include timers
 }
@@ -818,6 +822,12 @@ type InviteOptions struct {
 	OnEarlyMedia func(remoteSDP *SDPMedia, rtpSess *RTPSession) // Called on first 183 with SDP
 	AuthUsername string                                         // SIP digest auth username (optional)
 	AuthPassword string                                         // SIP digest auth password (optional)
+
+	// RTT (T.140 / RFC 4103) parameters. RTTEnabled offers m=text alongside
+	// audio in the INVITE. RTTRedundancy controls the RFC 2198 RED depth
+	// (0 = plain T.140, no RED).
+	RTTEnabled    bool
+	RTTRedundancy int
 }
 
 // Invite sends an outbound INVITE and returns an OutboundCall on success.
@@ -839,12 +849,28 @@ func (e *Engine) Invite(ctx context.Context, recipient sip.Uri, opts InviteOptio
 	// hosts decide directly; hostnames go through the OS resolver.
 	localIP := e.advertisedIPForRecipient(ctx, recipient.Host)
 
-	// Generate SDP offer
-	sdpOffer := GenerateOffer(SDPConfig{
+	// Optionally allocate a second RTP session for RTT (m=text).
+	var textRtpSess *RTPSession
+	cfg := SDPConfig{
 		LocalIP: localIP,
 		RTPPort: rtpSess.LocalPort(),
 		Codecs:  codecs,
-	})
+	}
+	if opts.RTTEnabled {
+		ts, terr := NewRTPSessionFromAllocator(e.portAlloc)
+		if terr != nil {
+			rtpSess.Close()
+			return nil, fmt.Errorf("create text RTP session: %w", terr)
+		}
+		textRtpSess = ts
+		cfg.TextRTPPort = ts.LocalPort()
+		cfg.TextT140PT = 99
+		cfg.TextREDPT = 98
+		cfg.RTTRedundancy = opts.RTTRedundancy
+	}
+
+	// Generate SDP offer
+	sdpOffer := GenerateOffer(cfg)
 
 	// Build the INVITE request. We construct it manually so we can set
 	// a proper typed FromHeader when FromUser is specified (appending a
@@ -875,6 +901,9 @@ func (e *Engine) Invite(ctx context.Context, recipient sip.Uri, opts InviteOptio
 	ds, err := e.dcCache.WriteInvite(ctx, req)
 	if err != nil {
 		rtpSess.Close()
+		if textRtpSess != nil {
+			textRtpSess.Close()
+		}
 		return nil, fmt.Errorf("invite: %w", err)
 	}
 
@@ -919,6 +948,9 @@ func (e *Engine) Invite(ctx context.Context, recipient sip.Uri, opts InviteOptio
 	}
 	if err := ds.WaitAnswer(ctx, answerOpts); err != nil {
 		rtpSess.Close()
+		if textRtpSess != nil {
+			textRtpSess.Close()
+		}
 		return nil, fmt.Errorf("wait answer: %w", err)
 	}
 	if ds.InviteResponse != nil {
@@ -928,6 +960,9 @@ func (e *Engine) Invite(ctx context.Context, recipient sip.Uri, opts InviteOptio
 	// Send ACK
 	if err := ds.Ack(ctx); err != nil {
 		rtpSess.Close()
+		if textRtpSess != nil {
+			textRtpSess.Close()
+		}
 		return nil, fmt.Errorf("ack: %w", err)
 	}
 
@@ -935,6 +970,9 @@ func (e *Engine) Invite(ctx context.Context, recipient sip.Uri, opts InviteOptio
 	remoteSDP, err := ParseSDP(ds.InviteResponse.Body())
 	if err != nil {
 		rtpSess.Close()
+		if textRtpSess != nil {
+			textRtpSess.Close()
+		}
 		ds.Bye(ctx)
 		return nil, fmt.Errorf("parse answer SDP: %w", err)
 	}
@@ -942,6 +980,9 @@ func (e *Engine) Invite(ctx context.Context, recipient sip.Uri, opts InviteOptio
 	// Set remote RTP address
 	if err := rtpSess.SetRemote(remoteSDP.RemoteIP, remoteSDP.RemotePort); err != nil {
 		rtpSess.Close()
+		if textRtpSess != nil {
+			textRtpSess.Close()
+		}
 		ds.Bye(ctx)
 		return nil, fmt.Errorf("set remote: %w", err)
 	}
@@ -951,6 +992,21 @@ func (e *Engine) Invite(ctx context.Context, recipient sip.Uri, opts InviteOptio
 	// the first packets go out immediately after we learn the remote address.
 	if len(remoteSDP.Codecs) > 0 {
 		rtpSess.SendKeepalive(remoteSDP.Codecs[0].PayloadType(), 3)
+	}
+
+	// Wire the text RTP session to the answer's text section, if accepted.
+	if textRtpSess != nil {
+		if remoteSDP.Text != nil && remoteSDP.Text.RemotePort != 0 {
+			if err := textRtpSess.SetRemote(remoteSDP.Text.RemoteIP, remoteSDP.Text.RemotePort); err != nil {
+				e.log.Warn("text RTP set remote failed", "error", err)
+				textRtpSess.Close()
+				textRtpSess = nil
+			}
+		} else {
+			// Peer rejected RTT — close the unused session.
+			textRtpSess.Close()
+			textRtpSess = nil
+		}
 	}
 
 	// Parse session timer from 200 OK if present.
@@ -972,6 +1028,7 @@ func (e *Engine) Invite(ctx context.Context, recipient sip.Uri, opts InviteOptio
 		Dialog:       ds,
 		RemoteSDP:    remoteSDP,
 		RTPSess:      rtpSess,
+		TextRTPSess:  textRtpSess,
 		SessionTimer: sessionTimer,
 	}, nil
 }
