@@ -787,10 +787,8 @@ func (s *Server) createSIPOutboundLeg(w http.ResponseWriter, r *http.Request, re
 		inviteOpts.AuthUsername = req.Auth.Username
 		inviteOpts.AuthPassword = req.Auth.Password
 	}
-	if s.Config.RTTEnabled {
+	if req.RTT {
 		inviteOpts.RTTEnabled = true
-		inviteOpts.RTTRedundancy = s.Config.RTTRedundancyLevel
-		l.SetRTTConfig(true, s.Config.RTTRedundancyLevel, s.Config.RTTBufferMs)
 	}
 	inviteOpts.OnEarlyMedia = func(remoteSDP *sipmod.SDPMedia, rtpSess *sipmod.RTPSession) {
 		if err := l.SetupEarlyMediaOutbound(remoteSDP, rtpSess); err != nil {
@@ -935,7 +933,6 @@ func (s *Server) HandleInboundCall(call *sipmod.InboundCall) {
 	// override for inbound: inbound tuning is operator-driven via the
 	// SIP_JITTER_BUFFER_MS env var.
 	l.SetJitterBuffer(s.Config.SIPJitterBufferMs, s.Config.SIPJitterBufferMaxMs)
-	l.SetRTTConfig(s.Config.RTTEnabled, s.Config.RTTRedundancyLevel, s.Config.RTTBufferMs)
 
 	// Route events for this leg to the per-leg webhook. Extract URL from SIP
 	// X-Webhook-URL header, falling back to the configured default.

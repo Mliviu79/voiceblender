@@ -8,13 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/VoiceBlender/voiceblender/internal/config"
 	"github.com/VoiceBlender/voiceblender/internal/events"
 )
 
 // rttBridge is the minimal RTT topology — two instances bridged by a single
-// outbound INVITE. Both sides have RTT_ENABLED, so SDP negotiation produces
-// an m=text section and a second RTP session per leg.
+// outbound INVITE. The caller passes "rtt": true on the originate request;
+// the callee always accepts an offered m=text section.
 type rttBridge struct {
 	caller, callee *testInstance
 	callerLegID    string
@@ -23,20 +22,16 @@ type rttBridge struct {
 
 func setupRTTBridge(t *testing.T) *rttBridge {
 	t.Helper()
-	enableRTT := func(c *config.Config) {
-		c.RTTEnabled = true
-		c.RTTRedundancyLevel = 2
-		c.RTTBufferMs = 150
-	}
 	b := &rttBridge{
-		caller: newTestInstanceWithOpts(t, "rtt-caller", enableRTT),
-		callee: newTestInstanceWithOpts(t, "rtt-callee", enableRTT),
+		caller: newTestInstance(t, "rtt-caller"),
+		callee: newTestInstance(t, "rtt-callee"),
 	}
 
 	body := map[string]interface{}{
 		"type":   "sip",
 		"uri":    fmt.Sprintf("sip:test@127.0.0.1:%d", b.callee.sipPort),
 		"codecs": []string{"PCMU"},
+		"rtt":    true,
 	}
 	resp := httpPost(t, b.caller.baseURL()+"/v1/legs", body)
 	if resp.StatusCode != http.StatusCreated {
@@ -107,14 +102,12 @@ func TestRTT_RoundTrip(t *testing.T) {
 	waitForRTT(t, b.caller, b.callerLegID, "world", 3*time.Second)
 }
 
-func TestRTT_NotEnabledRejectsSendCleanly(t *testing.T) {
-	// Caller has RTT enabled, callee does not — caller still negotiates
-	// successfully (peer can simply omit m=text), and SendText on callee
-	// must return 409 because RTT was not negotiated.
-	caller := newTestInstanceWithOpts(t, "rtt-caller-only", func(c *config.Config) {
-		c.RTTEnabled = true
-	})
-	callee := newTestInstance(t, "rtt-callee-disabled")
+func TestRTT_NotOfferedRejectsSendCleanly(t *testing.T) {
+	// Caller does NOT pass "rtt": true, so no m=text appears in the offer.
+	// The callee has nothing to accept — neither side negotiates RTT — and
+	// POST .../rtt on either side must return 409.
+	caller := newTestInstance(t, "rtt-no-offer-caller")
+	callee := newTestInstance(t, "rtt-no-offer-callee")
 
 	body := map[string]interface{}{
 		"type":   "sip",
@@ -132,7 +125,6 @@ func TestRTT_NotEnabledRejectsSendCleanly(t *testing.T) {
 	httpPost(t, fmt.Sprintf("%s/v1/legs/%s/answer", callee.baseURL(), in.ID), nil).Body.Close()
 	waitForLegState(t, caller.baseURL(), v.ID, "connected", 5*time.Second)
 
-	// SendText on the callee leg (which had no RTT) must 409.
 	r := httpPost(t, fmt.Sprintf("%s/v1/legs/%s/rtt", callee.baseURL(), in.ID),
 		map[string]string{"text": "x"})
 	if r.StatusCode != http.StatusConflict {

@@ -28,6 +28,11 @@ import (
 
 const rtpTimeout = 30 * time.Second
 
+// defaultRTTRedundancy is the RFC 2198 redundancy depth used for outgoing
+// T.140 packets. Two generations is the level Linphone and other reference
+// RFC 4103 implementations negotiate by default.
+const defaultRTTRedundancy = 2
+
 // SIPLeg wraps a SIP dialog (inbound or outbound) with RTP media handling.
 type SIPLeg struct {
 	id      string
@@ -107,7 +112,6 @@ type SIPLeg struct {
 	rttNegotiated  atomic.Bool
 	rttRedundancy  int
 	rttBufferMs    int
-	rttEnabled     bool
 	rttLocalPort   int   // bound local UDP port for the text session
 	textWriteStart int64 // UnixNano captured when writeLoop starts; basis for the 1 kHz timestamp
 
@@ -153,24 +157,6 @@ type rttIn struct {
 	seq        uint64
 	text       string
 	lossMarker bool
-}
-
-// SetRTTConfig enables RTT (T.140 / RFC 4103) on the leg with the given
-// redundancy depth and buffer interval. Call before media setup
-// (Answer / EnableEarlyMedia / outbound INVITE) — once setupTextMedia has
-// run, SDP is already locked.
-func (l *SIPLeg) SetRTTConfig(enabled bool, redundancy, bufferMs int) {
-	l.mu.Lock()
-	l.rttEnabled = enabled
-	if redundancy < 0 {
-		redundancy = 0
-	}
-	l.rttRedundancy = redundancy
-	if bufferMs < 50 {
-		bufferMs = t140.DefaultBufferMs
-	}
-	l.rttBufferMs = bufferMs
-	l.mu.Unlock()
 }
 
 // SetJitterBuffer configures the SIP ingress jitter buffer. targetMs is the
@@ -243,6 +229,8 @@ func NewSIPInboundLeg(call *sipmod.InboundCall, engine *sipmod.Engine, log *slog
 		engine:          engine,
 		localIP:         engine.AdvertisedIPForFamily(offerFamily),
 		supportedCodecs: engine.Codecs(),
+		rttRedundancy:   defaultRTTRedundancy,
+		rttBufferMs:     t140.DefaultBufferMs,
 		log:             log,
 	}
 	l.acceptDTMF.Store(true)
@@ -308,6 +296,8 @@ func NewSIPOutboundPendingLeg(engine *sipmod.Engine, codecs []codec.CodecType, l
 		engine:          engine,
 		localIP:         engine.BindIP(),
 		supportedCodecs: supported,
+		rttRedundancy:   defaultRTTRedundancy,
+		rttBufferMs:     t140.DefaultBufferMs,
 		log:             log,
 	}
 	l.acceptDTMF.Store(true)
@@ -1733,18 +1723,15 @@ func (l *SIPLeg) SendDTMF(ctx context.Context, digits string) error {
 	}
 }
 
-// setupInboundTextMedia allocates an RTP session for RTT when the leg is
-// configured for it AND the remote offer carries a usable m=text section.
-// Returns the local port the SDP answer must advertise (0 means no RTT in
-// the answer). When the remote offered RTT but we have it disabled the
-// returned (port, t140PT, redPT) are all zero and answerHasRejected is
-// true so the SDP answer can include a port=0 m=text section per RFC 3264.
+// setupInboundTextMedia allocates an RTP session for RTT whenever the remote
+// offer carries a usable m=text section. Returns the local port the SDP
+// answer must advertise (0 means no RTT in the answer). When the remote
+// advertised m=text but we cannot honor it (allocator exhausted, malformed
+// payload type), the returned answerHasRejected is true so the SDP answer
+// includes a port=0 m=text section per RFC 3264.
 func (l *SIPLeg) setupInboundTextMedia(remote *sipmod.SDPMedia) (port int, t140PT, redPT uint8, answerHasRejected bool) {
 	if remote == nil || remote.Text == nil {
 		return 0, 0, 0, false
-	}
-	if !l.rttEnabled {
-		return 0, 0, 0, true
 	}
 	if remote.Text.T140PT == 0 {
 		return 0, 0, 0, true

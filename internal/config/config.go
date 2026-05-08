@@ -49,9 +49,6 @@ type Config struct {
 	VSIEventBufferSize     int
 	DefaultSampleRate      int
 	SpeechDetectionEnabled bool
-	RTTEnabled             bool
-	RTTRedundancyLevel     int
-	RTTBufferMs            int
 }
 
 func Load() Config {
@@ -100,9 +97,6 @@ func Load() Config {
 		VSIEventBufferSize:     vsiBufferSize(envInt("VSI_EVENT_BUFFER_SIZE", 256)),
 		DefaultSampleRate:      defaultRate,
 		SpeechDetectionEnabled: os.Getenv("SPEECH_DETECTION_ENABLED") == "true",
-		RTTEnabled:             os.Getenv("RTT_ENABLED") == "true",
-		RTTRedundancyLevel:     envInt("RTT_REDUNDANCY_LEVEL", 2),
-		RTTBufferMs:            envInt("RTT_BUFFER_MS", 300),
 	}
 }
 

@@ -105,6 +105,7 @@ Originate an outbound SIP call.
 | `webhook_secret` | string | no | HMAC-SHA256 signing secret for the per-leg webhook. |
 | `amd` | object | no | Enable Answering Machine Detection on this outbound call. Disabled by default — omit the field entirely to skip AMD. Include the object to enable; all inner fields are optional and default to sensible values when omitted or zero. See **AMD Parameters** below. |
 | `speech_detection` | bool | no | Emit `speaking.started` / `speaking.stopped` events for this leg. Omit to use the server default (`SPEECH_DETECTION_ENABLED` env var, default `false`). |
+| `rtt` | bool | no | Offer Real-Time Text (T.140 / RFC 4103) on the outbound INVITE. The peer may accept or ignore the `m=text` section; audio negotiation is unaffected either way. Default: `false`. |
 
 **AMD Parameters** (all optional — `"amd": {}` enables AMD with all defaults):
 
@@ -569,13 +570,10 @@ curl -X POST http://localhost:8080/v1/legs/abc-123/dtmf/reject
 
 ### Real-Time Text (RTT, ITU-T T.140 / RFC 4103)
 
-VoiceBlender can negotiate an `m=text` media line alongside `m=audio` on SIP legs and exchange UTF-8 text in real time using the RFC 4103 RTP payload with optional RFC 2198 redundancy. Useful for accessibility (deaf / hard-of-hearing callers) and totally-conversational compliance scenarios.
+VoiceBlender can negotiate an `m=text` media line alongside `m=audio` on SIP legs and exchange UTF-8 text in real time using the RFC 4103 RTP payload with RFC 2198 redundancy. Useful for accessibility (deaf / hard-of-hearing callers) and totally-conversational compliance scenarios.
 
-RTT is **disabled by default**. Enable it server-wide by setting `RTT_ENABLED=true` (see Configuration). When enabled:
-
-- Every outbound INVITE offers an `m=text` section with `t140/1000` and `red/1000` payload types.
-- Every inbound INVITE that carries an `m=text` offer is answered with a matching section.
-- Peers that don't speak RFC 4103 simply ignore or reject the section; audio still negotiates normally.
+- **Inbound calls** automatically accept any `m=text` section the caller offers — no configuration needed.
+- **Outbound calls** offer RTT only when the originate request sets `"rtt": true` (see `POST /v1/legs`). Peers that don't speak RFC 4103 simply ignore or reject the section, and audio still negotiates normally.
 
 WebRTC legs do not currently bridge RTT (browsers use RFC 8865 over data channels rather than RFC 4103 over RTP).
 
