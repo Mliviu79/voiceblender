@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"net"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -84,8 +85,18 @@ type SIPLeg struct {
 	jbMaxMs      int // max queue depth in ms
 	jbFrameBytes int // native-rate 20ms frame size in bytes (silence size on underrun)
 
-	earlyMediaSDP []byte            // SDP sent in 183, reused in 200 OK on Answer
-	sipHeaders    map[string]string // X-* headers from inbound INVITE or outbound request
+	earlyMediaSDP    []byte            // SDP sent in 183, reused in 200 OK on Answer
+	sipHeaders       map[string]string // X-* headers from inbound INVITE or outbound request
+	preferredCodec   codec.CodecType   // optional codec hint set via SignalAnswer; CodecUnknown = no preference
+	disconnectReason string            // optional override for leg.disconnected reason; set by Reject() before dialog cancel
+
+	// Idempotency gates. Termination methods (Hangup, Reject) and the
+	// disconnect-event publisher all run from racing goroutines (API DELETE,
+	// remote BYE, RTP timeout, etc.); these flags ensure each side-effect
+	// happens exactly once per leg.
+	byeOnce        sync.Once
+	rejectOnce     sync.Once
+	disconnectDone atomic.Bool
 
 	engine          *sipmod.Engine    // for sending re-INVITEs
 	localIP         string            // for SDP answer generation
@@ -408,18 +419,121 @@ func (l *SIPLeg) WaitConnected(ctx context.Context) error {
 	}
 }
 
-// SignalAnswer signals the leg to answer (called from REST API).
-func (l *SIPLeg) SignalAnswer() {
+// SignalAnswer signals the leg to answer (called from REST API). preferred
+// is an optional codec hint passed to Answer; pass CodecUnknown for none.
+func (l *SIPLeg) SignalAnswer(preferred codec.CodecType) {
+	l.mu.Lock()
+	l.preferredCodec = preferred
+	l.mu.Unlock()
 	select {
 	case l.answerCh <- struct{}{}:
 	default:
 	}
 }
 
+// PreferredCodec returns the codec hint last set via SignalAnswer.
+func (l *SIPLeg) PreferredCodec() codec.CodecType {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.preferredCodec
+}
+
+// RemoteOfferCodecs returns the codecs offered by the remote in the inbound
+// INVITE SDP, in offer order. Returns nil for outbound legs or when no offer
+// has been parsed yet.
+func (l *SIPLeg) RemoteOfferCodecs() []codec.CodecType {
+	if l.inbound == nil || l.inbound.RemoteSDP == nil {
+		return nil
+	}
+	out := make([]codec.CodecType, len(l.inbound.RemoteSDP.Codecs))
+	copy(out, l.inbound.RemoteSDP.Codecs)
+	return out
+}
+
+// Reject sends a final non-2xx response on an unanswered inbound leg,
+// terminating the dialog without ever creating a session. statusCode is the
+// SIP status code (e.g. 486, 603); reasonPhrase is the SIP reason phrase
+// shown after the status code on the response line.
+//
+// Only valid on inbound legs in StateRinging or StateEarlyMedia. After
+// Reject succeeds the dialog context is cancelled by sipgo, so the
+// inbound-call goroutine wakes up and publishes leg.disconnected — if the
+// caller wants the disconnect event to carry a specific reason, it should
+// call SetDisconnectReason first.
+func (l *SIPLeg) Reject(ctx context.Context, statusCode int, reasonPhrase string) error {
+	if l.inbound == nil {
+		return fmt.Errorf("cannot reject outbound leg")
+	}
+	l.mu.RLock()
+	st := l.state
+	l.mu.RUnlock()
+	if st != StateRinging && st != StateEarlyMedia {
+		return fmt.Errorf("leg is %s, expected ringing or early_media", st)
+	}
+	var respErr error
+	l.rejectOnce.Do(func() {
+		l.setState(StateHungUp)
+		if err := l.inbound.Dialog.Respond(
+			statusCode, reasonPhrase, nil,
+			l.engine.ServerHeader(),
+		); err != nil {
+			respErr = fmt.Errorf("respond %d: %w", statusCode, err)
+			return
+		}
+		l.cancel()
+	})
+	return respErr
+}
+
+// SetDisconnectReason stores a reason that will be used in the next
+// leg.disconnected event published for this leg, in place of the goroutine's
+// default. Set by the API DELETE handler before calling Reject or Hangup so
+// the user-provided cause flows through to the event.
+func (l *SIPLeg) SetDisconnectReason(reason string) {
+	l.mu.Lock()
+	l.disconnectReason = reason
+	l.mu.Unlock()
+}
+
+// DisconnectReason returns the override set by SetDisconnectReason, or "" if
+// none. Consumed by the inbound-call goroutine when publishing
+// leg.disconnected.
+func (l *SIPLeg) DisconnectReason() string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.disconnectReason
+}
+
+// SendRinging sends a 180 Ringing provisional response with no SDP. Only
+// valid for inbound legs in StateRinging. May be called multiple times —
+// each call emits another 180 (RFC-allowed; receivers tolerate re-sends).
+func (l *SIPLeg) SendRinging(ctx context.Context) error {
+	if l.inbound == nil {
+		return fmt.Errorf("cannot send ringing on outbound leg")
+	}
+	l.mu.RLock()
+	st := l.state
+	l.mu.RUnlock()
+	if st != StateRinging {
+		return fmt.Errorf("leg is %s, not ringing", st)
+	}
+	if err := l.inbound.Dialog.Respond(
+		sip.StatusRinging, "Ringing", nil,
+		l.engine.ServerHeader(),
+	); err != nil {
+		return fmt.Errorf("send 180: %w", err)
+	}
+	return nil
+}
+
 // EnableEarlyMedia sends 183 Session Progress with SDP and sets up the media
 // pipeline so audio can flow before the call is answered. Only valid for
 // inbound legs in StateRinging.
-func (l *SIPLeg) EnableEarlyMedia(ctx context.Context) error {
+//
+// preferred biases codec selection: when non-zero and present in both the
+// remote offer and the supported list, it wins; otherwise selection falls
+// back to the default offer-order preference.
+func (l *SIPLeg) EnableEarlyMedia(ctx context.Context, preferred codec.CodecType) error {
 	if l.inbound == nil {
 		return fmt.Errorf("cannot enable early media on outbound leg")
 	}
@@ -432,7 +546,7 @@ func (l *SIPLeg) EnableEarlyMedia(ctx context.Context) error {
 	}
 
 	// Negotiate codec from remote offer
-	negotiated, pt, ok := sipmod.NegotiateCodec(l.inbound.RemoteSDP, l.supportedCodecs)
+	negotiated, pt, ok := sipmod.NegotiateCodecPreferred(l.inbound.RemoteSDP, l.supportedCodecs, preferred)
 	if !ok {
 		return fmt.Errorf("no common codec negotiated")
 	}
@@ -480,6 +594,10 @@ func (l *SIPLeg) EnableEarlyMedia(ctx context.Context) error {
 	return nil
 }
 
+// Answer sends 200 OK to the inbound INVITE. Codec selection respects any
+// hint set via SignalAnswer; a CodecUnknown hint falls back to the default
+// offer-order preference. The hint is ignored when the leg is already in
+// StateEarlyMedia (the codec was locked in at 183).
 func (l *SIPLeg) Answer(ctx context.Context) error {
 	if l.inbound == nil {
 		return fmt.Errorf("cannot answer outbound leg")
@@ -489,6 +607,7 @@ func (l *SIPLeg) Answer(ctx context.Context) error {
 	l.mu.RLock()
 	sdp := l.earlyMediaSDP
 	st := l.state
+	preferred := l.preferredCodec
 	l.mu.RUnlock()
 
 	if st == StateEarlyMedia && sdp != nil {
@@ -521,7 +640,7 @@ func (l *SIPLeg) Answer(ctx context.Context) error {
 	// Normal answer path from ringing state.
 
 	// Negotiate codec from remote offer
-	negotiated, pt, ok := sipmod.NegotiateCodec(l.inbound.RemoteSDP, l.supportedCodecs)
+	negotiated, pt, ok := sipmod.NegotiateCodecPreferred(l.inbound.RemoteSDP, l.supportedCodecs, preferred)
 	if !ok {
 		return fmt.Errorf("no common codec negotiated")
 	}
@@ -656,6 +775,16 @@ func (l *SIPLeg) popLoop() {
 // readLoop reads RTP packets from the UDP socket, decodes audio, and pushes
 // native-rate PCM frames into inFrames.
 func (l *SIPLeg) readLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			l.log.Error("readLoop panic, hanging up leg",
+				"leg_id", l.id,
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
+			_ = l.Hangup(context.Background())
+		}
+	}()
 	for {
 		// Set read deadline for RTP timeout detection.
 		// When held, use a very long deadline (beyond hold timer) to avoid
@@ -858,6 +987,21 @@ func (l *SIPLeg) RTPStats() RTPStats {
 
 // writeLoop sends RTP packets on a 20ms ticker.
 func (l *SIPLeg) writeLoop() {
+	// Defense in depth against panics deep in the audio pipeline (third-party
+	// codec libraries, pion, etc.). Without this, one bad frame on one leg
+	// kills the whole instance. Recover, log with stack, and hang up just
+	// this leg cleanly via the normal teardown path.
+	defer func() {
+		if r := recover(); r != nil {
+			l.log.Error("writeLoop panic, hanging up leg",
+				"leg_id", l.id,
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
+			_ = l.Hangup(context.Background())
+		}
+	}()
+
 	const (
 		ptime            = 20 * time.Millisecond
 		telephoneEventPT = uint8(101)
@@ -975,6 +1119,11 @@ func (l *SIPLeg) writeLoop() {
 	}
 }
 
+// Hangup transitions the leg to StateHungUp and (exactly once) sends a BYE
+// on the underlying SIP dialog. State transition, context cancel, RTP-session
+// close, and timer cleanup happen on every call (idempotent operations); the
+// SIP BYE is gated by sync.Once so concurrent termination paths cannot emit
+// duplicate BYEs.
 func (l *SIPLeg) Hangup(ctx context.Context) error {
 	l.setState(StateHungUp)
 	// Cancel up front so downstream goroutines unblock without waiting on BYE.
@@ -993,16 +1142,25 @@ func (l *SIPLeg) Hangup(ctx context.Context) error {
 	}
 
 	// BYE is fire-and-forget so a non-responsive peer can't stall callers.
-	go func(inbound *sipmod.InboundCall, outbound *sipmod.OutboundCall) {
-		byeCtx, byeCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer byeCancel()
-		if inbound != nil {
-			inbound.Dialog.Bye(byeCtx)
-		} else if outbound != nil {
-			outbound.Dialog.Bye(byeCtx)
-		}
-	}(l.inbound, l.outbound)
+	l.byeOnce.Do(func() {
+		go func(inbound *sipmod.InboundCall, outbound *sipmod.OutboundCall) {
+			byeCtx, byeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer byeCancel()
+			if inbound != nil {
+				inbound.Dialog.Bye(byeCtx)
+			} else if outbound != nil {
+				outbound.Dialog.Bye(byeCtx)
+			}
+		}(l.inbound, l.outbound)
+	})
 	return nil
+}
+
+// ClaimDisconnect returns true on the first caller and false on every
+// subsequent caller. Termination paths use this gate so only one publishes
+// leg.disconnected, even when DELETE racing with remote BYE or RTP timeout.
+func (l *SIPLeg) ClaimDisconnect() bool {
+	return l.disconnectDone.CompareAndSwap(false, true)
 }
 
 // sipReader reads PCM frames from the inFrames channel.
