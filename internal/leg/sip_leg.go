@@ -1860,6 +1860,15 @@ func (l *SIPLeg) textReadLoop() {
 			return
 		}
 
+		// Only honor packets carrying one of the negotiated PTs. Anything
+		// else (mux'd RTCP that slipped past the lower-layer filter, or
+		// foreign streams sharing the port) would otherwise be treated as
+		// plain T.140 and produce garbage text.
+		if pkt.PayloadType != t140PT && (redPT == 0 || pkt.PayloadType != redPT) {
+			l.log.Debug("RTT skip non-text PT", "leg_id", l.id, "pt", pkt.PayloadType)
+			continue
+		}
+
 		text, lost, derr := l.textDecoder.DecodePacket(pkt.SequenceNumber, pkt.Timestamp, pkt.PayloadType, t140PT, redPT, pkt.Payload)
 		if derr != nil {
 			l.log.Debug("RTT decode error", "leg_id", l.id, "error", derr)
@@ -1972,6 +1981,14 @@ func (l *SIPLeg) textWriteLoop() {
 			l.log.Debug("RTT WriteRTP failed", "leg_id", l.id, "error", err)
 			return
 		}
+		l.log.Debug("rtt sent",
+			"leg_id", l.id,
+			"pt", pt,
+			"seq", seqNum,
+			"ts", ts,
+			"red", useRED,
+			"bytes", len(payload),
+		)
 		seqNum++
 		firstPacket = false
 	}
