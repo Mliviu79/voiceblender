@@ -5,12 +5,33 @@ import (
 	"errors"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
 	"github.com/VoiceBlender/voiceblender/internal/leg"
 	"github.com/go-chi/chi/v5"
 )
 
-func (s *Server) doSendLegRTT(ctx context.Context, id, text string) error {
+// rttPreviewMaxRunes caps how many runes of an RTT chunk are emitted in
+// debug logs. Keeps log lines bounded for very long sends; full content
+// is still available via SIP_DEBUG wire dumps when needed.
+const rttPreviewMaxRunes = 64
+
+// rttPreview returns a UTF-8-safe preview suitable for slog values.
+func rttPreview(text string) string {
+	if utf8.RuneCountInString(text) <= rttPreviewMaxRunes {
+		return text
+	}
+	count := 0
+	for i := range text {
+		if count == rttPreviewMaxRunes {
+			return text[:i] + "…"
+		}
+		count++
+	}
+	return text
+}
+
+func (s *Server) doSendLegRTT(ctx context.Context, source, id, text string) error {
 	l, ok := s.LegMgr.Get(id)
 	if !ok {
 		return newAPIError(http.StatusNotFound, "leg not found")
@@ -21,6 +42,7 @@ func (s *Server) doSendLegRTT(ctx context.Context, id, text string) error {
 	if !l.RTTNegotiated() {
 		return newAPIError(http.StatusConflict, "RTT not negotiated for this leg")
 	}
+	s.Log.Debug("rtt send", "leg_id", id, "source", source, "len", len(text), "runes", utf8.RuneCountInString(text), "preview", rttPreview(text))
 	if err := l.SendText(ctx, text); err != nil {
 		if errors.Is(err, leg.ErrRTTNotNegotiated) {
 			return newAPIError(http.StatusConflict, "%s", err.Error())
@@ -38,32 +60,48 @@ func (s *Server) sendRTT(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	if err := s.doSendLegRTT(r.Context(), id, req.Text); err != nil {
+	if err := s.doSendLegRTT(r.Context(), "rest", id, req.Text); err != nil {
 		handleAPIError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 }
 
-func (s *Server) acceptRTTLeg(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+func (s *Server) doAcceptLegRTT(id string) error {
 	l, ok := s.LegMgr.Get(id)
 	if !ok {
-		writeError(w, http.StatusNotFound, "leg not found")
-		return
+		return newAPIError(http.StatusNotFound, "leg not found")
 	}
 	l.SetAcceptText(true)
+	s.Log.Debug("rtt accept", "leg_id", id)
+	return nil
+}
+
+func (s *Server) acceptRTTLeg(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := s.doAcceptLegRTT(id); err != nil {
+		handleAPIError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "rtt_accepting"})
+}
+
+func (s *Server) doRejectLegRTT(id string) error {
+	l, ok := s.LegMgr.Get(id)
+	if !ok {
+		return newAPIError(http.StatusNotFound, "leg not found")
+	}
+	l.SetAcceptText(false)
+	s.Log.Debug("rtt reject", "leg_id", id)
+	return nil
 }
 
 func (s *Server) rejectRTTLeg(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	l, ok := s.LegMgr.Get(id)
-	if !ok {
-		writeError(w, http.StatusNotFound, "leg not found")
+	if err := s.doRejectLegRTT(id); err != nil {
+		handleAPIError(w, err)
 		return
 	}
-	l.SetAcceptText(false)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "rtt_rejecting"})
 }
 
@@ -82,6 +120,7 @@ func (s *Server) broadcastRTT(fromLegID, text string) {
 		if p.ID() == fromLegID || !p.AcceptText() || !p.RTTNegotiated() {
 			continue
 		}
+		s.Log.Debug("rtt broadcast", "from_leg", fromLegID, "to_leg", p.ID(), "len", len(text))
 		go func(target leg.Leg) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()

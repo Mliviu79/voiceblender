@@ -1818,6 +1818,8 @@ The server sends application-level pings every 30 seconds. The connection is als
 
 Upgrade to a WebSocket connection and receive all events in real-time as JSON text frames. The JSON shape is identical to webhook payloads (same `Event.MarshalJSON` format).
 
+The full machine-readable contract for the VSI WebSocket — every command, every event, every lifecycle frame — lives in [`asyncapi.yaml`](./asyncapi.yaml) (AsyncAPI 3.0). The tables below are a quick reference; the YAML is authoritative and is generated from `internal/api/vsi_meta.go` via `make asyncapi`.
+
 **Upgrade:** Standard HTTP → WebSocket upgrade. No request body.
 
 **Query Parameters:**
@@ -1901,6 +1903,9 @@ The WebSocket accepts bidirectional commands using the same naming as the REST A
 | `send_leg_dtmf` | `{"id":"...","digits":"123"}` | Send DTMF digits on a leg |
 | `accept_leg_dtmf` | `{"id":"..."}` | Enable DTMF reception |
 | `reject_leg_dtmf` | `{"id":"..."}` | Disable DTMF reception |
+| `send_leg_rtt` | `{"id":"...","text":"hello"}` | Send Real-Time Text (T.140) on a SIP leg with negotiated `m=text` |
+| `accept_leg_rtt` | `{"id":"..."}` | Enable RTT reception (default) |
+| `reject_leg_rtt` | `{"id":"..."}` | Disable RTT reception |
 | `list_rooms` | *(none)* | List all rooms |
 | `get_room` | `{"id":"..."}` | Get a single room |
 | `create_room` | `CreateRoomRequest` | Create a room |

@@ -1,4 +1,5 @@
 //go:generate go run ../../cmd/openapi-gen
+//go:generate go run ../../cmd/asyncapi-gen
 
 package api
 

@@ -144,6 +144,9 @@ go test -tags integration -v -timeout 60s -run TestWSEvents ./tests/integration/
 | `TestDTMFBroadcast_SenderExcluded` | Originating leg never receives a forwarded copy of its own DTMF |
 | `TestRTT_RoundTrip` | Two RTT-enabled instances exchange T.140 / RFC 4103 text in both directions; `rtt.received` events fire with the sent payload |
 | `TestRTT_NotEnabledRejectsSendCleanly` | When the peer omits `m=text`, audio still negotiates; `POST /v1/legs/{id}/rtt` on the un-negotiated side returns 409 |
+| `TestVSI_RTT_SendDelivers` | VSI `send_leg_rtt` over the `/v1/vsi` WebSocket delivers text to the remote leg (parity with REST `POST /rtt`) |
+| `TestVSI_RTT_AcceptRejectFlags` | VSI `accept_leg_rtt`/`reject_leg_rtt` toggle the receiver's `accept_text` flag; rejected legs suppress `rtt.received` events |
+| `TestVSI_RTT_SendOnNonNegotiatedLegReturns409` | VSI `send_leg_rtt` returns an error frame when RTT was never negotiated on the leg |
 | `TestWSEvents_ConnectedAndEvents` | Connect to `/v1/vsi`, originate a call, verify `leg.ringing` event arrives |
 | `TestWSEvents_UnknownCommand` | Send unknown command with `request_id`, verify error response echoes it |
 | `TestWSEvents_StopCommand` | Send `stop`, verify server closes the connection |

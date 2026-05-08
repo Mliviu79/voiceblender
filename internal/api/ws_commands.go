@@ -22,6 +22,12 @@ type dtmfPayload struct {
 	Digits string `json:"digits"`
 }
 
+// rttPayload carries text for send_leg_rtt.
+type rttPayload struct {
+	ID   string `json:"id"`
+	Text string `json:"text"`
+}
+
 // addLegPayload combines room_id with AddLegRequest fields.
 type addLegPayload struct {
 	RoomID     string `json:"room_id"`
@@ -149,6 +155,22 @@ func (s *Server) wsHandleCommand(lw *wsLockedWriter, msg vsiInMsg) {
 		s.wsSimpleLegCommand(lw, msg, s.doAcceptLegDTMF, "dtmf_accepting")
 	case "reject_leg_dtmf":
 		s.wsSimpleLegCommand(lw, msg, s.doRejectLegDTMF, "dtmf_rejecting")
+
+	// ── RTT (Real-Time Text, T.140) ─────────────────────────────────
+	case "send_leg_rtt":
+		var p rttPayload
+		if !s.wsParsePayload(lw, msg, &p) {
+			return
+		}
+		if err := s.doSendLegRTT(context.Background(), "vsi", p.ID, p.Text); err != nil {
+			s.wsCommandError(lw, msg, err)
+			return
+		}
+		s.wsCommandResult(lw, msg, map[string]string{"status": "sent"})
+	case "accept_leg_rtt":
+		s.wsSimpleLegCommand(lw, msg, s.doAcceptLegRTT, "rtt_accepting")
+	case "reject_leg_rtt":
+		s.wsSimpleLegCommand(lw, msg, s.doRejectLegRTT, "rtt_rejecting")
 
 	// ── Room queries ────────────────────────────────────────────────
 	case "list_rooms":
