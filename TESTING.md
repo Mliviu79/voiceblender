@@ -105,6 +105,7 @@ go test -tags integration -v -timeout 60s -run TestWSEvents ./tests/integration/
 | Test | Description |
 |------|-------------|
 | `TestOutboundInbound_Connect` | Basic SIP call: A dials B, B answers, both connect |
+| `TestUseSourceSocket_RoundTripCall` | Smoke test for `SIP_USE_SOURCE_SOCKET=true`: end-to-end call setup, BYE, and disconnect events still complete with the flag enabled. Unit tests in `internal/sip/engine_test.go` (`TestEngine_PinDestinationToSource`) cover the destination-pinning logic itself. |
 | `TestCall_IPv6Loopback` | Same as above, but both instances are bound to `[::1]` (IPv6 loopback). Skipped when the host has no IPv6 loopback. |
 | `TestCall_DualStackInterop_V4Caller` | A dual-stack callee answers an IPv4-only caller with `IN IP4` SDP — exercises the family-from-offer rule. |
 | `TestDisconnect_DurationFields` | Verify `duration_total` and `duration_answered` in disconnect event |

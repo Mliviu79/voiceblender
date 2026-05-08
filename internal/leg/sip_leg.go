@@ -521,7 +521,8 @@ func (l *SIPLeg) Reject(ctx context.Context, statusCode int, reasonPhrase string
 	var respErr error
 	l.rejectOnce.Do(func() {
 		l.setState(StateHungUp)
-		if err := l.inbound.Dialog.Respond(
+		if err := l.engine.DialogRespond(
+			l.inbound.Dialog,
 			statusCode, reasonPhrase, nil,
 			l.engine.ServerHeader(),
 		); err != nil {
@@ -565,7 +566,8 @@ func (l *SIPLeg) SendRinging(ctx context.Context) error {
 	if st != StateRinging {
 		return fmt.Errorf("leg is %s, not ringing", st)
 	}
-	if err := l.inbound.Dialog.Respond(
+	if err := l.engine.DialogRespond(
+		l.inbound.Dialog,
 		sip.StatusRinging, "Ringing", nil,
 		l.engine.ServerHeader(),
 	); err != nil {
@@ -634,7 +636,8 @@ func (l *SIPLeg) EnableEarlyMedia(ctx context.Context, preferred codec.CodecType
 	l.mu.Unlock()
 
 	// Send 183 Session Progress with SDP
-	if err := l.inbound.Dialog.Respond(
+	if err := l.engine.DialogRespond(
+		l.inbound.Dialog,
 		sip.StatusSessionInProgress, "Session Progress",
 		answerSDP,
 		sip.NewHeader("Content-Type", "application/sdp"),
@@ -669,7 +672,7 @@ func (l *SIPLeg) Answer(ctx context.Context) error {
 	if st == StateEarlyMedia && sdp != nil {
 		if l.sessionInterval > 0 {
 			// Use Respond to include session timer headers.
-			if err := l.inbound.Dialog.Respond(sip.StatusOK, "OK", sdp,
+			if err := l.engine.DialogRespond(l.inbound.Dialog, sip.StatusOK, "OK", sdp,
 				sip.NewHeader("Content-Type", "application/sdp"),
 				sip.NewHeader("Supported", "timer"),
 				sip.NewHeader("Session-Expires", sipmod.FormatSessionExpires(l.sessionInterval, l.sessionRefresher)),
@@ -678,7 +681,7 @@ func (l *SIPLeg) Answer(ctx context.Context) error {
 				return fmt.Errorf("respond SDP: %w", err)
 			}
 		} else {
-			if err := l.inbound.Dialog.Respond(sip.StatusOK, "OK", sdp,
+			if err := l.engine.DialogRespond(l.inbound.Dialog, sip.StatusOK, "OK", sdp,
 				sip.NewHeader("Content-Type", "application/sdp"),
 				l.engine.ServerHeader(),
 			); err != nil {
@@ -733,7 +736,7 @@ func (l *SIPLeg) Answer(ctx context.Context) error {
 	// Send 200 OK with SDP answer
 	if l.sessionInterval > 0 {
 		// Include session timer headers in 200 OK.
-		if err := l.inbound.Dialog.Respond(sip.StatusOK, "OK", answerSDP,
+		if err := l.engine.DialogRespond(l.inbound.Dialog, sip.StatusOK, "OK", answerSDP,
 			sip.NewHeader("Content-Type", "application/sdp"),
 			sip.NewHeader("Supported", "timer"),
 			sip.NewHeader("Session-Expires", sipmod.FormatSessionExpires(l.sessionInterval, l.sessionRefresher)),
@@ -743,7 +746,7 @@ func (l *SIPLeg) Answer(ctx context.Context) error {
 			return fmt.Errorf("respond SDP: %w", err)
 		}
 	} else {
-		if err := l.inbound.Dialog.Respond(sip.StatusOK, "OK", answerSDP,
+		if err := l.engine.DialogRespond(l.inbound.Dialog, sip.StatusOK, "OK", answerSDP,
 			sip.NewHeader("Content-Type", "application/sdp"),
 			l.engine.ServerHeader(),
 		); err != nil {

@@ -909,7 +909,7 @@ func (s *Server) HandleInboundCall(call *sipmod.InboundCall) {
 	}
 
 	// 100 Trying is always sent so the UAC can stop INVITE retransmissions.
-	if err := call.Dialog.Respond(sip.StatusTrying, "Trying", nil, s.SIPEngine.ServerHeader()); err != nil {
+	if err := s.SIPEngine.DialogRespond(call.Dialog, sip.StatusTrying, "Trying", nil, s.SIPEngine.ServerHeader()); err != nil {
 		s.Log.Error("failed to send 100 Trying", "error", err)
 		return
 	}
@@ -917,7 +917,7 @@ func (s *Server) HandleInboundCall(call *sipmod.InboundCall) {
 	// drives ringing explicitly via POST /v1/legs/{id}/ring (or skips straight
 	// to /early-media or /answer).
 	if s.Config.SIPAutoRinging {
-		if err := call.Dialog.Respond(sip.StatusRinging, "Ringing", nil, s.SIPEngine.ServerHeader()); err != nil {
+		if err := s.SIPEngine.DialogRespond(call.Dialog, sip.StatusRinging, "Ringing", nil, s.SIPEngine.ServerHeader()); err != nil {
 			s.Log.Error("failed to send 180 Ringing", "error", err)
 			return
 		}
