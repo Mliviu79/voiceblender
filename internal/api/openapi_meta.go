@@ -656,7 +656,7 @@ func RoutesMetadata() []RouteMeta {
 			Summary: "Get server-side ICE candidates for a WebRTC leg (trickle ICE)",
 			Tags:    []string{"WebRTC"},
 			Responses: map[int]ResponseMeta{
-				200: {Description: "Buffered ICE candidates"},
+				200: {Description: "Buffered ICE candidates", Type: WebRTCCandidatesResult{}},
 				400: {Description: "Leg is not a WebRTC leg"},
 				404: {Description: "Leg not found"},
 			},
@@ -958,7 +958,7 @@ func RoutesMetadata() []RouteMeta {
 			Tags:        []string{"WebRTC"},
 			RequestType: WebRTCOfferRequest{},
 			Responses: map[int]ResponseMeta{
-				200: {Description: "SDP answer with leg ID"},
+				200: {Description: "SDP answer with leg ID", Type: WebRTCOfferResult{}},
 				400: {Description: "Invalid JSON or invalid SDP offer"},
 				500: {Description: "Peer connection, track creation, or answer generation failed"},
 			},

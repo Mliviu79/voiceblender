@@ -1906,6 +1906,9 @@ The WebSocket accepts bidirectional commands using the same naming as the REST A
 | `send_leg_rtt` | `{"id":"...","text":"hello"}` | Send Real-Time Text (T.140) on a SIP leg with negotiated `m=text` |
 | `accept_leg_rtt` | `{"id":"..."}` | Enable RTT reception (default) |
 | `reject_leg_rtt` | `{"id":"..."}` | Disable RTT reception |
+| `webrtc_offer` | `{"sdp":"..."}` | Establish a WebRTC leg via SDP offer/answer; returns `{leg_id, sdp}` |
+| `webrtc_add_candidate` | `{"id":"...","candidate":{"candidate":"...","sdpMid":"0","sdpMLineIndex":0}}` | Add a remote ICE candidate to a WebRTC leg |
+| `webrtc_get_candidates` | `{"id":"..."}` | Drain server-gathered ICE candidates; returns `{candidates, done}` |
 | `list_rooms` | *(none)* | List all rooms |
 | `get_room` | `{"id":"..."}` | Get a single room |
 | `create_room` | `CreateRoomRequest` | Create a room |
@@ -2056,6 +2059,40 @@ Retrieve server-side ICE candidates gathered since the last call (trickle ICE). 
 **Errors:**
 - `400` — Leg is not a WebRTC leg
 - `404` — Leg not found
+
+---
+
+### WebRTC over VSI
+
+The same offer/answer/trickle-ICE flow is also available over the `/v1/vsi` WebSocket — useful when a client is already connected to receive events and wants to avoid an extra HTTP round trip per ICE candidate. Three commands mirror the REST endpoints:
+
+| Command | Payload | Result |
+|---------|---------|--------|
+| `webrtc_offer` | `{"sdp":"..."}` | `{"leg_id":"...","sdp":"..."}` |
+| `webrtc_add_candidate` | `{"id":"...","candidate":{...}}` | `{"status":"added"}` |
+| `webrtc_get_candidates` | `{"id":"..."}` | `{"candidates":[...],"done":true}` |
+
+**Example exchange:**
+
+```json
+// Client → server
+{"type":"webrtc_offer","request_id":"r1","payload":{"sdp":"v=0\r\no=- ..."}}
+
+// Server → client
+{"type":"webrtc_offer.result","request_id":"r1","data":{"leg_id":"550e8400-...","sdp":"v=0\r\no=- ..."}}
+
+// Client → server (one frame per browser-side candidate)
+{"type":"webrtc_add_candidate","request_id":"r2","payload":{"id":"550e8400-...","candidate":{"candidate":"candidate:...","sdpMid":"0","sdpMLineIndex":0}}}
+
+// Server → client
+{"type":"webrtc_add_candidate.result","request_id":"r2","data":{"status":"added"}}
+
+// Client polls until done=true
+{"type":"webrtc_get_candidates","request_id":"r3","payload":{"id":"550e8400-..."}}
+{"type":"webrtc_get_candidates.result","request_id":"r3","data":{"candidates":[{"candidate":"candidate:...","sdpMid":"0","sdpMLineIndex":0}],"done":false}}
+```
+
+The returned `leg_id` is interchangeable with REST: subsequent `mute_leg`, `add_leg_to_room`, `delete_leg`, etc. all accept it. Errors follow the standard VSI error envelope (`{"type":"error","request_id":"...","data":{"code":...,"message":"..."}}`).
 
 ---
 

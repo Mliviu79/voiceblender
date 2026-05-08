@@ -1222,7 +1222,7 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/StatusResponse'
+                                $ref: '#/components/schemas/WebRTCCandidatesResult'
                 '400':
                     description: Leg is not a WebRTC leg
                     content:
@@ -1958,7 +1958,7 @@ paths:
                     content:
                         application/json:
                             schema:
-                                $ref: '#/components/schemas/StatusResponse'
+                                $ref: '#/components/schemas/WebRTCOfferResult'
                 '400':
                     description: Invalid JSON or invalid SDP offer
                     content:
@@ -2653,6 +2653,28 @@ components:
                     description: Digest auth password.
             required:
                 - password
+        WebRTCCandidatesResult:
+            type: object
+            properties:
+                candidates:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/ICECandidateInit'
+                done:
+                    type: boolean
+            required:
+                - candidates
+                - done
+        WebRTCOfferResult:
+            type: object
+            properties:
+                leg_id:
+                    type: string
+                sdp:
+                    type: string
+            required:
+                - leg_id
+                - sdp
         WebhookEvent:
             type: object
             description: Event envelope delivered via HTTP POST to registered webhook URLs. Event-specific fields are flattened into the top-level object (no "data" wrapper). Includes X-Signature-256 header when a secret is configured.

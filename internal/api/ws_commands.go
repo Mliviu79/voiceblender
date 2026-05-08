@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+
+	"github.com/pion/webrtc/v4"
 )
 
 // idPayload is the common payload shape for commands targeting a single resource.
@@ -26,6 +28,13 @@ type dtmfPayload struct {
 type rttPayload struct {
 	ID   string `json:"id"`
 	Text string `json:"text"`
+}
+
+// vsiWebRTCAddCandidatePayload combines a leg id with an ICE candidate for
+// webrtc_add_candidate.
+type vsiWebRTCAddCandidatePayload struct {
+	ID        string                  `json:"id"`
+	Candidate webrtc.ICECandidateInit `json:"candidate"`
 }
 
 // addLegPayload combines room_id with AddLegRequest fields.
@@ -171,6 +180,42 @@ func (s *Server) wsHandleCommand(lw *wsLockedWriter, msg vsiInMsg) {
 		s.wsSimpleLegCommand(lw, msg, s.doAcceptLegRTT, "rtt_accepting")
 	case "reject_leg_rtt":
 		s.wsSimpleLegCommand(lw, msg, s.doRejectLegRTT, "rtt_rejecting")
+
+	// ── WebRTC ──────────────────────────────────────────────────────
+	case "webrtc_offer":
+		var req WebRTCOfferRequest
+		if !s.wsParsePayload(lw, msg, &req) {
+			return
+		}
+		result, err := s.doWebRTCOffer(req)
+		if err != nil {
+			s.wsCommandError(lw, msg, err)
+			return
+		}
+		s.wsCommandResult(lw, msg, result)
+
+	case "webrtc_add_candidate":
+		var p vsiWebRTCAddCandidatePayload
+		if !s.wsParsePayload(lw, msg, &p) {
+			return
+		}
+		if err := s.doWebRTCAddCandidate(p.ID, p.Candidate); err != nil {
+			s.wsCommandError(lw, msg, err)
+			return
+		}
+		s.wsCommandResult(lw, msg, map[string]string{"status": "added"})
+
+	case "webrtc_get_candidates":
+		var p idPayload
+		if !s.wsParsePayload(lw, msg, &p) {
+			return
+		}
+		result, err := s.doWebRTCGetCandidates(p.ID)
+		if err != nil {
+			s.wsCommandError(lw, msg, err)
+			return
+		}
+		s.wsCommandResult(lw, msg, result)
 
 	// ── Room queries ────────────────────────────────────────────────
 	case "list_rooms":

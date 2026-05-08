@@ -92,6 +92,25 @@ func VSICommandsMetadata() []VSICommandMeta {
 		{Name: "send_leg_rtt", Summary: "Send Real-Time Text (T.140) on a SIP leg", PayloadType: rttPayload{}, ResultType: vsiStatusResponse{}, ErrorCodes: []int{400, 404, 409, 500}},
 		{Name: "accept_leg_rtt", Summary: "Enable RTT reception", PayloadType: idPayload{}, ResultType: vsiStatusResponse{}, ErrorCodes: []int{404}},
 		{Name: "reject_leg_rtt", Summary: "Disable RTT reception", PayloadType: idPayload{}, ResultType: vsiStatusResponse{}, ErrorCodes: []int{404}},
+		// ── WebRTC ──────────────────────────────────────────────────────
+		{
+			Name: "webrtc_offer", Summary: "Establish a WebRTC leg via SDP offer/answer",
+			Description: "Accepts a browser SDP offer, allocates a peer connection, returns the local SDP answer plus the new leg id. " +
+				"Subsequent ICE candidates from the browser are delivered via webrtc_add_candidate; server-side candidates are drained via webrtc_get_candidates.",
+			PayloadType: WebRTCOfferRequest{}, ResultType: WebRTCOfferResult{},
+			ErrorCodes: []int{400, 500},
+		},
+		{
+			Name: "webrtc_add_candidate", Summary: "Add a remote ICE candidate to a WebRTC leg",
+			PayloadType: vsiWebRTCAddCandidatePayload{}, ResultType: vsiStatusResponse{},
+			ErrorCodes: []int{400, 404, 500},
+		},
+		{
+			Name: "webrtc_get_candidates", Summary: "Drain server-gathered ICE candidates for a WebRTC leg",
+			Description: "Returns any local ICE candidates that have been gathered since the last call, plus a `done` flag indicating ICE gathering has completed. Clients should poll until `done` is true.",
+			PayloadType: idPayload{}, ResultType: WebRTCCandidatesResult{},
+			ErrorCodes: []int{400, 404},
+		},
 		// ── Rooms ───────────────────────────────────────────────────────
 		{Name: "list_rooms", Summary: "List all rooms", ResultType: []RoomView{}},
 		{Name: "get_room", Summary: "Get a single room by id", PayloadType: idPayload{}, ResultType: RoomView{}, ErrorCodes: []int{404}},

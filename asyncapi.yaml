@@ -82,6 +82,18 @@ channels:
                 $ref: '#/components/messages/reject_leg_rtt'
             reject_leg_rtt.result:
                 $ref: '#/components/messages/reject_leg_rttResult'
+            webrtc_offer:
+                $ref: '#/components/messages/webrtc_offer'
+            webrtc_offer.result:
+                $ref: '#/components/messages/webrtc_offerResult'
+            webrtc_add_candidate:
+                $ref: '#/components/messages/webrtc_add_candidate'
+            webrtc_add_candidate.result:
+                $ref: '#/components/messages/webrtc_add_candidateResult'
+            webrtc_get_candidates:
+                $ref: '#/components/messages/webrtc_get_candidates'
+            webrtc_get_candidates.result:
+                $ref: '#/components/messages/webrtc_get_candidatesResult'
             list_rooms:
                 $ref: '#/components/messages/list_rooms'
             list_rooms.result:
@@ -420,6 +432,47 @@ operations:
                 $ref: '#/channels/vsi'
             messages:
                 - $ref: '#/channels/vsi/messages/reject_leg_rtt.result'
+                - $ref: '#/channels/vsi/messages/error'
+    recv_webrtc_offer:
+        action: receive
+        channel:
+            $ref: '#/channels/vsi'
+        summary: Establish a WebRTC leg via SDP offer/answer
+        description: Accepts a browser SDP offer, allocates a peer connection, returns the local SDP answer plus the new leg id. Subsequent ICE candidates from the browser are delivered via webrtc_add_candidate; server-side candidates are drained via webrtc_get_candidates.
+        messages:
+            - $ref: '#/channels/vsi/messages/webrtc_offer'
+        reply:
+            channel:
+                $ref: '#/channels/vsi'
+            messages:
+                - $ref: '#/channels/vsi/messages/webrtc_offer.result'
+                - $ref: '#/channels/vsi/messages/error'
+    recv_webrtc_add_candidate:
+        action: receive
+        channel:
+            $ref: '#/channels/vsi'
+        summary: Add a remote ICE candidate to a WebRTC leg
+        messages:
+            - $ref: '#/channels/vsi/messages/webrtc_add_candidate'
+        reply:
+            channel:
+                $ref: '#/channels/vsi'
+            messages:
+                - $ref: '#/channels/vsi/messages/webrtc_add_candidate.result'
+                - $ref: '#/channels/vsi/messages/error'
+    recv_webrtc_get_candidates:
+        action: receive
+        channel:
+            $ref: '#/channels/vsi'
+        summary: Drain server-gathered ICE candidates for a WebRTC leg
+        description: Returns any local ICE candidates that have been gathered since the last call, plus a `done` flag indicating ICE gathering has completed. Clients should poll until `done` is true.
+        messages:
+            - $ref: '#/channels/vsi/messages/webrtc_get_candidates'
+        reply:
+            channel:
+                $ref: '#/channels/vsi'
+            messages:
+                - $ref: '#/channels/vsi/messages/webrtc_get_candidates.result'
                 - $ref: '#/channels/vsi/messages/error'
     recv_list_rooms:
         action: receive
@@ -1336,6 +1389,96 @@ components:
                         $ref: '#/components/schemas/vsiStatusResponse'
                 required:
                     - type
+        webrtc_offer:
+            name: webrtc_offer
+            title: Establish a WebRTC leg via SDP offer/answer
+            summary: Establish a WebRTC leg via SDP offer/answer
+            payload:
+                type: object
+                properties:
+                    type:
+                        const: webrtc_offer
+                    request_id:
+                        type: string
+                        description: Echoed back on the matching .result/error frame; clients use it to correlate.
+                    payload:
+                        $ref: '#/components/schemas/WebRTCOfferRequest'
+                required:
+                    - type
+        webrtc_offerResult:
+            name: webrtc_offerResult
+            title: Establish a WebRTC leg via SDP offer/answer — success response
+            payload:
+                type: object
+                properties:
+                    type:
+                        const: webrtc_offer.result
+                    request_id:
+                        type: string
+                    data:
+                        $ref: '#/components/schemas/WebRTCOfferResult'
+                required:
+                    - type
+        webrtc_add_candidate:
+            name: webrtc_add_candidate
+            title: Add a remote ICE candidate to a WebRTC leg
+            summary: Add a remote ICE candidate to a WebRTC leg
+            payload:
+                type: object
+                properties:
+                    type:
+                        const: webrtc_add_candidate
+                    request_id:
+                        type: string
+                        description: Echoed back on the matching .result/error frame; clients use it to correlate.
+                    payload:
+                        $ref: '#/components/schemas/vsiWebRTCAddCandidatePayload'
+                required:
+                    - type
+        webrtc_add_candidateResult:
+            name: webrtc_add_candidateResult
+            title: Add a remote ICE candidate to a WebRTC leg — success response
+            payload:
+                type: object
+                properties:
+                    type:
+                        const: webrtc_add_candidate.result
+                    request_id:
+                        type: string
+                    data:
+                        $ref: '#/components/schemas/vsiStatusResponse'
+                required:
+                    - type
+        webrtc_get_candidates:
+            name: webrtc_get_candidates
+            title: Drain server-gathered ICE candidates for a WebRTC leg
+            summary: Drain server-gathered ICE candidates for a WebRTC leg
+            payload:
+                type: object
+                properties:
+                    type:
+                        const: webrtc_get_candidates
+                    request_id:
+                        type: string
+                        description: Echoed back on the matching .result/error frame; clients use it to correlate.
+                    payload:
+                        $ref: '#/components/schemas/idPayload'
+                required:
+                    - type
+        webrtc_get_candidatesResult:
+            name: webrtc_get_candidatesResult
+            title: Drain server-gathered ICE candidates for a WebRTC leg — success response
+            payload:
+                type: object
+                properties:
+                    type:
+                        const: webrtc_get_candidates.result
+                    request_id:
+                        type: string
+                    data:
+                        $ref: '#/components/schemas/WebRTCCandidatesResult'
+                required:
+                    - type
         list_rooms:
             name: list_rooms
             title: List all rooms
@@ -1890,6 +2033,51 @@ components:
                 - status
                 - room_id
                 - leg_id
+        ICECandidateInit:
+            type: object
+            properties:
+                candidate:
+                    type: string
+                sdpMid:
+                    type: string
+                sdpMLineIndex:
+                    type: integer
+                usernameFragment:
+                    type: string
+            required:
+                - candidate
+                - sdpMid
+                - sdpMLineIndex
+                - usernameFragment
+        WebRTCCandidatesResult:
+            type: object
+            properties:
+                candidates:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/ICECandidateInit'
+                done:
+                    type: boolean
+            required:
+                - candidates
+                - done
+        WebRTCOfferRequest:
+            type: object
+            properties:
+                sdp:
+                    type: string
+            required:
+                - sdp
+        WebRTCOfferResult:
+            type: object
+            properties:
+                leg_id:
+                    type: string
+                sdp:
+                    type: string
+            required:
+                - leg_id
+                - sdp
         addLegPayload:
             type: object
             properties:
@@ -1970,3 +2158,13 @@ components:
                     type: string
             required:
                 - status
+        vsiWebRTCAddCandidatePayload:
+            type: object
+            properties:
+                id:
+                    type: string
+                candidate:
+                    $ref: '#/components/schemas/ICECandidateInit'
+            required:
+                - id
+                - candidate

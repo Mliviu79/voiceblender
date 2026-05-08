@@ -147,6 +147,9 @@ go test -tags integration -v -timeout 60s -run TestWSEvents ./tests/integration/
 | `TestVSI_RTT_SendDelivers` | VSI `send_leg_rtt` over the `/v1/vsi` WebSocket delivers text to the remote leg (parity with REST `POST /rtt`) |
 | `TestVSI_RTT_AcceptRejectFlags` | VSI `accept_leg_rtt`/`reject_leg_rtt` toggle the receiver's `accept_text` flag; rejected legs suppress `rtt.received` events |
 | `TestVSI_RTT_SendOnNonNegotiatedLegReturns409` | VSI `send_leg_rtt` returns an error frame when RTT was never negotiated on the leg |
+| `TestVSI_WebRTC_FullFlow` | VSI `webrtc_offer` / `webrtc_get_candidates` / `webrtc_add_candidate` round-trip with a real pion client; leg appears in `list_legs` and emits `leg.connected` |
+| `TestVSI_WebRTC_OfferInvalidSDP` | VSI `webrtc_offer` with malformed SDP returns a 400 error frame |
+| `TestVSI_WebRTC_AddCandidateNotFound` | VSI `webrtc_add_candidate` for an unknown leg returns a 404 error frame |
 | `TestWSEvents_ConnectedAndEvents` | Connect to `/v1/vsi`, originate a call, verify `leg.ringing` event arrives |
 | `TestWSEvents_UnknownCommand` | Send unknown command with `request_id`, verify error response echoes it |
 | `TestWSEvents_StopCommand` | Send `stop`, verify server closes the connection |
