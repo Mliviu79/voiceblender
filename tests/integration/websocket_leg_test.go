@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -228,6 +229,274 @@ func TestWSLegOutboundDialFailure(t *testing.T) {
 // integration-level testing on localhost is unreliable because the kernel TCP
 // buffers are large enough that the write deadline rarely trips within a
 // reasonable test budget.
+
+// TestWSLegAudioFlows verifies that audio actually traverses the full
+// pipeline: a tone is played into a room, the WS leg in that room receives
+// it from the mixer, encodes it as binary PCM, and ships it over the WS.
+// We measure the RMS of the received frames to confirm the bytes are real
+// audio (not silence or zero-padding).
+func TestWSLegAudioFlows(t *testing.T) {
+	inst := newTestInstance(t, "ws-audio-flow")
+
+	wsURL := "ws://" + inst.httpAddr +
+		"/v1/legs/websocket?sample_rate=16000&wire_format=binary&room_id=audio-room"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, _, err := ws.Dial(ctx, wsURL)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Wait for the leg to be registered + added to the room before we kick
+	// off playback (otherwise the tone player has no participants to feed).
+	ringing := inst.collector.waitForMatch(t, events.LegRinging, nil, 2*time.Second)
+	legID := ringing.Data.GetLegID()
+	inst.collector.waitForMatch(t, events.LegConnected, func(e events.Event) bool {
+		return e.Data.GetLegID() == legID
+	}, 2*time.Second)
+	inst.collector.waitForMatch(t, events.LegJoinedRoom, func(e events.Event) bool {
+		return e.Data.GetLegID() == legID
+	}, 2*time.Second)
+
+	// Start a looping dial-tone playback into the room.
+	playResp := httpPost(t, inst.baseURL()+"/v1/rooms/audio-room/play", map[string]any{
+		"tone":   "us_dial",
+		"repeat": -1,
+	})
+	if playResp.StatusCode != http.StatusOK {
+		t.Fatalf("play: status=%d", playResp.StatusCode)
+	}
+	playResp.Body.Close()
+
+	// Read binary frames off the WS until we either:
+	//  - accumulate enough audio to compute a meaningful RMS, or
+	//  - run out of time.
+	const (
+		frameBytes = 640                     // 16kHz × 20ms × 2 bytes/sample
+		minFrames  = 25                      // ~500 ms of audio
+		readBudget = 5 * time.Second
+	)
+
+	var (
+		audioBytes []byte
+		gotFrames  int
+		deadline   = time.Now().Add(readBudget)
+	)
+	for gotFrames < minFrames && time.Now().Before(deadline) {
+		wsutilx.SetReadDeadline(conn, time.Until(deadline))
+		hdr, err := ws.ReadHeader(conn)
+		if err != nil {
+			t.Fatalf("read header: %v", err)
+		}
+		payload := make([]byte, hdr.Length)
+		if _, err := io.ReadFull(conn, payload); err != nil {
+			t.Fatalf("read payload: %v", err)
+		}
+		if hdr.Masked {
+			ws.Cipher(payload, hdr.Mask, 0)
+		}
+		// Skip control + non-binary frames — only audio counts.
+		if hdr.OpCode != ws.OpBinary {
+			continue
+		}
+		if len(payload) != frameBytes {
+			t.Fatalf("unexpected binary frame size: got %d, want %d", len(payload), frameBytes)
+		}
+		audioBytes = append(audioBytes, payload...)
+		gotFrames++
+	}
+
+	if gotFrames < minFrames {
+		t.Fatalf("only got %d audio frames within %v (want %d)", gotFrames, readBudget, minFrames)
+	}
+
+	// Compute RMS of the collected PCM. A continuous dial tone at
+	// nominal level sits around RMS 8000-15000 in int16 space; pure
+	// silence is 0. Use 200 as a generous floor to confirm the signal
+	// is non-trivial.
+	var sumSquares float64
+	sampleCount := len(audioBytes) / 2
+	for i := 0; i < sampleCount; i++ {
+		s := int16(binary.LittleEndian.Uint16(audioBytes[i*2:]))
+		sumSquares += float64(s) * float64(s)
+	}
+	rms := 0.0
+	if sampleCount > 0 {
+		rms = sqrt(sumSquares / float64(sampleCount))
+	}
+	t.Logf("WS leg received %d frames (%d samples), RMS=%.1f", gotFrames, sampleCount, rms)
+	if rms < 200 {
+		t.Fatalf("RMS=%.1f is too low; audio is silent or near-silent (want >200 for a dial tone)", rms)
+	}
+
+	httpDelete(t, inst.baseURL()+"/v1/legs/"+legID)
+}
+
+// TestWSLegAudioFlowsBidirectional verifies audio in both directions: two
+// WebSocket legs sit in the same room; client A streams a synthesized 1 kHz
+// sine wave, the mixer routes it (mixed-minus-self) to client B, and we
+// confirm the bytes B receives carry real audio. Symmetric to
+// TestWSLegAudioFlows, but exercises the ingress (WS → mixer) path that
+// the egress-only test doesn't cover.
+func TestWSLegAudioFlowsBidirectional(t *testing.T) {
+	inst := newTestInstance(t, "ws-bidi-flow")
+
+	wsURL := "ws://" + inst.httpAddr +
+		"/v1/legs/websocket?sample_rate=16000&wire_format=binary&room_id=bidi-room"
+
+	seen := map[string]bool{}
+	dial := func(label string) (net.Conn, string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		conn, _, _, err := ws.Dial(ctx, wsURL)
+		if err != nil {
+			t.Fatalf("dial %s: %v", label, err)
+		}
+		ringing := inst.collector.waitForMatch(t, events.LegRinging, func(e events.Event) bool {
+			return !seen[e.Data.GetLegID()]
+		}, 2*time.Second)
+		legID := ringing.Data.GetLegID()
+		seen[legID] = true
+		inst.collector.waitForMatch(t, events.LegConnected, func(e events.Event) bool {
+			return e.Data.GetLegID() == legID
+		}, 2*time.Second)
+		inst.collector.waitForMatch(t, events.LegJoinedRoom, func(e events.Event) bool {
+			return e.Data.GetLegID() == legID
+		}, 2*time.Second)
+		return conn, legID
+	}
+
+	connA, legA := dial("A")
+	defer connA.Close()
+	connB, legB := dial("B")
+	defer connB.Close()
+	t.Logf("legA=%s legB=%s", legA, legB)
+
+	// Client A streams a 1 kHz sine forever (until the test cancels).
+	const (
+		sampleRate = 16000
+		frameBytes = 640 // 20ms @ 16kHz × 2 bytes/sample
+		amplitude  = 8000.0
+		freqHz     = 1000.0
+	)
+	stopSender := make(chan struct{})
+	defer close(stopSender)
+	go func() {
+		var phase float64
+		const dPhase = 2 * 3.141592653589793 * freqHz / sampleRate
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopSender:
+				return
+			case <-ticker.C:
+				frame := make([]byte, frameBytes)
+				for i := 0; i < frameBytes/2; i++ {
+					sample := int16(amplitude * sineApprox(phase))
+					binary.LittleEndian.PutUint16(frame[i*2:], uint16(sample))
+					phase += dPhase
+				}
+				if err := wsutil.WriteClientBinary(connA, frame); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	// Client B reads binary frames and computes RMS over ~500ms of audio.
+	const (
+		minFrames  = 25
+		readBudget = 5 * time.Second
+	)
+	var (
+		audioBytes []byte
+		gotFrames  int
+		deadline   = time.Now().Add(readBudget)
+	)
+	for gotFrames < minFrames && time.Now().Before(deadline) {
+		wsutilx.SetReadDeadline(connB, time.Until(deadline))
+		hdr, err := ws.ReadHeader(connB)
+		if err != nil {
+			t.Fatalf("B read header: %v", err)
+		}
+		payload := make([]byte, hdr.Length)
+		if _, err := io.ReadFull(connB, payload); err != nil {
+			t.Fatalf("B read payload: %v", err)
+		}
+		if hdr.Masked {
+			ws.Cipher(payload, hdr.Mask, 0)
+		}
+		if hdr.OpCode != ws.OpBinary {
+			continue
+		}
+		if len(payload) != frameBytes {
+			t.Fatalf("unexpected B frame size: got %d, want %d", len(payload), frameBytes)
+		}
+		audioBytes = append(audioBytes, payload...)
+		gotFrames++
+	}
+
+	if gotFrames < minFrames {
+		t.Fatalf("B only got %d frames within %v (want %d)", gotFrames, readBudget, minFrames)
+	}
+
+	var sumSquares float64
+	sampleCount := len(audioBytes) / 2
+	for i := 0; i < sampleCount; i++ {
+		s := int16(binary.LittleEndian.Uint16(audioBytes[i*2:]))
+		sumSquares += float64(s) * float64(s)
+	}
+	rms := 0.0
+	if sampleCount > 0 {
+		rms = sqrt(sumSquares / float64(sampleCount))
+	}
+	t.Logf("legB received %d frames (%d samples), RMS=%.1f", gotFrames, sampleCount, rms)
+	if rms < 200 {
+		t.Fatalf("B RMS=%.1f is too low; ingress→mixer→egress audio path looks broken (want >200)", rms)
+	}
+
+	httpDelete(t, inst.baseURL()+"/v1/legs/"+legA)
+	httpDelete(t, inst.baseURL()+"/v1/legs/"+legB)
+}
+
+// sineApprox is a tiny sine approximation good enough for an RMS check
+// without pulling math into this build.
+func sineApprox(x float64) float64 {
+	// Wrap x into [-pi, pi].
+	const twoPi = 2 * 3.141592653589793
+	const pi = 3.141592653589793
+	for x > pi {
+		x -= twoPi
+	}
+	for x < -pi {
+		x += twoPi
+	}
+	// Bhaskara I sine approximation — max error ~1.6e-3, plenty for an
+	// RMS-above-floor test.
+	return (16 * x * (pi - absF(x))) / (5*pi*pi - 4*absF(x)*(pi-absF(x)))
+}
+
+func absF(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+// sqrt is a local helper to avoid pulling math into this test file.
+func sqrt(x float64) float64 {
+	if x <= 0 {
+		return 0
+	}
+	z := x
+	for i := 0; i < 16; i++ {
+		z = (z + x/z) / 2
+	}
+	return z
+}
 
 // quick echo control test confirming pong replies and text payloads survive.
 func TestWSLegPing(t *testing.T) {

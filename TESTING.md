@@ -174,6 +174,8 @@ go test -tags integration -v -timeout 60s -run TestWSEvents ./tests/integration/
 | `TestWSLegInboundAutoConnect` | WebSocket client connects to `/v1/legs/websocket`, joins a room, exchanges audio + text, `headers` map captures X-/P- headers |
 | `TestWSLegOutboundDialAndHeaders` | `POST /v1/legs` with `type:"websocket"` dials a remote WS echo server, verifies the echo server received the supplied X-Correlation-ID header |
 | `TestWSLegOutboundDialFailure` | Outbound WS dial to a non-listening port produces a `leg.disconnected` event with a mapped reason |
+| `TestWSLegAudioFlows` | Egress audio: WS leg joins a room, a tone playback runs into the room, the WS client reads binary PCM frames and asserts RMS is well above the silence floor |
+| `TestWSLegAudioFlowsBidirectional` | Ingress + egress audio: two WS legs in the same room; client A streams a 1 kHz sine, client B reads PCM frames and asserts the sine survives the WS→mixer→WS round-trip (RMS above the silence floor) |
 | `TestWSLegPing` | Inbound WS leg replies to a `{"type":"ping","event_id":N}` text frame with a matching pong |
 
 ---
