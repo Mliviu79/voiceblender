@@ -142,6 +142,16 @@ All configuration is via environment variables:
 
 Full reference: [API.md](API.md)
 
+> **API authentication.** The HTTP surface — REST, the `/v1/vsi` event
+> WebSocket, `/v1/legs/websocket`, the `/v1/legs/moq` WebTransport endpoint,
+> `/metrics`, and pprof — has **no built-in credential authentication** (no API
+> key, bearer token, or session). Access is gated **solely** by the `ALLOWED_IPS`
+> allowlist and your network placement. Do not expose it to untrusted networks;
+> front it with a reverse proxy or gateway that enforces auth if you need
+> per-caller credentials. This is distinct from SIP-layer auth (digest challenge
+> of inbound INVITE/REGISTER) and outbound webhook signing (`WEBHOOK_SECRET`),
+> which are covered separately below.
+
 ### Legs
 
 ```
@@ -236,15 +246,18 @@ POST   /v1/sip/registrations/attempts/{id}/accept           # Accept a parked in
 POST   /v1/sip/registrations/attempts/{id}/reject           # Reject a parked inbound REGISTER
 ```
 
-Inbound INVITE and REGISTER are accepted without authentication by default. Both
-are handled symmetrically: every inbound request is surfaced to the client (an
-INVITE via `leg.ringing`, a REGISTER via `sip.registration_attempt`), and the
-client may **challenge** it (e.g. based on its source address). VoiceBlender
-replies `401` with a digest `WWW-Authenticate` and verifies the credentialed
-retry itself against the supplied `password`/`ha1`. INVITE challenges target the
-ringing leg by id; REGISTER attempts are challenged/accepted/rejected by
-`attempt_id`. If the client does not challenge, the request proceeds (the INVITE
-remains answerable; the REGISTER auto-accepts after the consult window).
+Inbound INVITE and REGISTER are handled symmetrically: every inbound request is
+surfaced to the client (an INVITE via `leg.ringing`, a REGISTER via
+`sip.registration_attempt`), which may **challenge** it (e.g. based on its source
+address). VoiceBlender replies `401` with a digest `WWW-Authenticate` and
+verifies the credentialed retry itself against the supplied `password`/`ha1`.
+INVITE challenges target the ringing leg by id; REGISTER attempts are
+challenged/accepted/rejected by `attempt_id`.
+
+If the client does not decide, the two differ: an unchallenged INVITE simply
+keeps ringing and remains answerable (nothing is auto-answered), while an
+undecided REGISTER falls back to `SIP_INBOUND_REGISTER_DEFAULT` after the consult
+window — **`reject` (403) by default** (fail-closed), or `accept` to bind it.
 
 ### SIP Trunks (outbound REGISTER)
 
