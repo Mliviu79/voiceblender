@@ -352,6 +352,45 @@ func (a *Analyzer) WaitForBeep(ctx context.Context, reader io.Reader) BeepResult
 	return BeepResult{}
 }
 
+// FeedBeep advances beep detection with a chunk of 16 kHz PCM bytes without
+// blocking — the push-mode sibling of WaitForBeep. It drains complete 640-byte
+// frames from its accumulator and returns (BeepResult, true) once the beep is
+// confirmed or BeepTimeout worth of frames have been consumed, or (zero, false)
+// to request more frames. It performs no io.ReadFull, so a stalled feed cannot
+// hang here.
+//
+// Because the timeout advances only as frames arrive, a caller that must bound
+// the beep window in wall-clock time needs its own timer as well.
+//
+// The caller must serialize FeedBeep against Feed and OnDeadline.
+func (a *Analyzer) FeedBeep(pcm []byte) (BeepResult, bool) {
+	if a.beepDet == nil {
+		a.beepDet = newBeepDetector(beepMinFreq, beepMaxFreq, beepEnergyRatio, beepMinFrames)
+	}
+	a.beepAccum = append(a.beepAccum, pcm...)
+	samples := make([]int16, samplesPerFrame)
+
+	for len(a.beepAccum) >= frameSizeBytes {
+		if a.beepWaited >= a.params.BeepTimeout {
+			return BeepResult{}, true
+		}
+
+		frame := a.beepAccum[:frameSizeBytes]
+		for i := range samples {
+			samples[i] = int16(binary.LittleEndian.Uint16(frame[i*2 : i*2+2]))
+		}
+		a.beepAccum = a.beepAccum[frameSizeBytes:]
+
+		a.beepWaited += frameDuration
+
+		if a.beepDet.feed(samples) {
+			return BeepResult{Detected: true, BeepMs: ms(a.beepWaited)}, true
+		}
+	}
+
+	return BeepResult{}, false
+}
+
 // computeRMS returns the root-mean-square of int16 PCM samples.
 // Same formula as internal/mixer/speaking.go.
 func computeRMS(samples []int16) float64 {
