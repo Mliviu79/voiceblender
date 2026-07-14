@@ -100,6 +100,12 @@ func runStereo(t *testing.T, frames [][]byte, hook func(k int, leftPW *syncPipeW
 	// The master EOFs at the end of the script, which ends the recording.
 	r.Wait()
 
+	// Every stereo case also pins the publish contract: the staging file must
+	// not outlive the recording, and the published file must keep the mode
+	// consumers have always seen it with.
+	assertNoStagingResidue(t, dir)
+	assertPublishedMode(t, fpath)
+
 	return readStereoWAV(t, fpath)
 }
 

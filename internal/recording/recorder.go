@@ -28,6 +28,7 @@ type Recorder struct {
 	recording bool
 	cancel    context.CancelFunc
 	filePath  string
+	published bool
 	done      chan struct{}
 	log       *slog.Logger
 	paused    atomic.Bool
@@ -46,7 +47,7 @@ func (r *Recorder) Start(ctx context.Context, reader io.Reader, dir string) (str
 // StartAt begins recording from reader to a mono WAV file in dir at the specified sample rate.
 // Returns the file path of the recording.
 func (r *Recorder) StartAt(ctx context.Context, reader io.Reader, dir string, sampleRate uint32) (string, error) {
-	f, fpath, cancel, err := r.initRecording(ctx, dir)
+	staged, cancel, err := r.initRecording(ctx, dir)
 	if err != nil {
 		return "", err
 	}
@@ -56,13 +57,16 @@ func (r *Recorder) StartAt(ctx context.Context, reader io.Reader, dir string, sa
 		// blocked on Wait() observe IsRecording()==false the moment they wake.
 		defer close(r.done)
 		defer r.clearRecording()
-		err := r.recordMono(cancel.ctx, reader, f, int(sampleRate))
+		err := r.recordMono(cancel.ctx, reader, staged.f, int(sampleRate))
 		if err != nil && cancel.ctx.Err() == nil {
 			r.log.Error("recording error", "error", err)
 		}
+		// Publishing runs ahead of the deferred handshake so that Wait callers
+		// find the recording at its final path the moment they wake.
+		r.finish(staged, err)
 	}()
 
-	return fpath, nil
+	return staged.finalPath, nil
 }
 
 // StartStereo begins a stereo recording with left and right channel readers.
@@ -75,7 +79,7 @@ func (r *Recorder) StartAt(ctx context.Context, reader io.Reader, dir string, sa
 //
 // Returns the file path of the recording.
 func (r *Recorder) StartStereo(ctx context.Context, left, right io.Reader, dir string, sampleRate uint32) (string, error) {
-	f, fpath, cancel, err := r.initRecording(ctx, dir)
+	staged, cancel, err := r.initRecording(ctx, dir)
 	if err != nil {
 		return "", err
 	}
@@ -85,13 +89,16 @@ func (r *Recorder) StartStereo(ctx context.Context, left, right io.Reader, dir s
 		// blocked on Wait() observe IsRecording()==false the moment they wake.
 		defer close(r.done)
 		defer r.clearRecording()
-		err := r.recordStereo(cancel.ctx, left, right, f, int(sampleRate))
+		err := r.recordStereo(cancel.ctx, left, right, staged.f, int(sampleRate))
 		if err != nil && cancel.ctx.Err() == nil {
 			r.log.Error("stereo recording error", "error", err)
 		}
+		// Publishing runs ahead of the deferred handshake so that Wait callers
+		// find the recording at its final path the moment they wake.
+		r.finish(staged, err)
 	}()
 
-	return fpath, nil
+	return staged.finalPath, nil
 }
 
 // cancelCtx bundles a context with its cancel function for passing to initRecording callers.
@@ -100,37 +107,62 @@ type cancelCtx struct {
 	cancel context.CancelFunc
 }
 
-// initRecording sets up the recording file and state. Returns the open file,
-// its path, and a cancellable context. The caller must call clearRecording when done.
-func (r *Recorder) initRecording(ctx context.Context, dir string) (*os.File, string, cancelCtx, error) {
+// initRecording sets up the recording file and state. Returns the staged
+// recording and a cancellable context. The recording is captured to a staging
+// file and only appears at its final path once the caller publishes it, so the
+// path handed back names a file that does not exist yet. The caller must call
+// clearRecording when done.
+func (r *Recorder) initRecording(ctx context.Context, dir string) (*stagedFile, cancelCtx, error) {
 	r.mu.Lock()
 	if r.recording {
 		r.mu.Unlock()
-		return nil, "", cancelCtx{}, fmt.Errorf("recording already in progress")
+		return nil, cancelCtx{}, fmt.Errorf("recording already in progress")
 	}
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		r.mu.Unlock()
-		return nil, "", cancelCtx{}, fmt.Errorf("create recording dir: %w", err)
+		return nil, cancelCtx{}, fmt.Errorf("create recording dir: %w", err)
 	}
 
 	filename := fmt.Sprintf("%s_%s.wav", time.Now().Format("20060102_150405"), uuid.New().String()[:8])
 	fpath := filepath.Join(dir, filename)
 
-	f, err := os.Create(fpath)
+	staged, err := createStagedFile(fpath)
 	if err != nil {
 		r.mu.Unlock()
-		return nil, "", cancelCtx{}, fmt.Errorf("create recording file: %w", err)
+		return nil, cancelCtx{}, fmt.Errorf("create recording file: %w", err)
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	r.cancel = cancel
 	r.recording = true
 	r.filePath = fpath
+	r.published = false
 	r.done = make(chan struct{})
 	r.mu.Unlock()
 
-	return f, fpath, cancelCtx{ctx: ctx, cancel: cancel}, nil
+	return staged, cancelCtx{ctx: ctx, cancel: cancel}, nil
+}
+
+// finish publishes or discards the staged recording once the capture loop has
+// returned.
+//
+// Publishing is gated on the capture loop reporting no error, not on how it
+// ended: Stop cancels the context, and both capture loops report a cancelled
+// context as a successful end of recording. Treating cancellation as a failure
+// would discard every normally stopped recording.
+func (r *Recorder) finish(staged *stagedFile, recErr error) {
+	if recErr != nil {
+		discardTemp(staged.f, staged.tmpPath)
+		return
+	}
+	if err := publishFile(staged.f, staged.tmpPath, staged.finalPath); err != nil {
+		r.log.Error("publish recording", "error", err, "file", staged.finalPath)
+		return
+	}
+	r.mu.Lock()
+	r.published = true
+	r.mu.Unlock()
 }
 
 // clearRecording resets the recorder state after recording finishes.
@@ -167,6 +199,17 @@ func (r *Recorder) IsRecording() bool {
 	return r.recording
 }
 
+// Published reports whether the last recording's bytes actually reached the
+// path Stop returns. It is false while a recording is still running, and false
+// afterwards if the capture failed mid-write, because a failed capture's bytes
+// are discarded rather than published — leaving nothing at that path. Callers
+// that hand the path on to something else should check this after Wait.
+func (r *Recorder) Published() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.published
+}
+
 // Pause instructs the recorder to replace incoming audio with silence
 // until Resume is called. Returns true if the state changed (i.e., the
 // recorder was running and not already paused).
@@ -199,9 +242,10 @@ func (r *Recorder) IsPaused() bool {
 // recordMono writes raw PCM data as a mono WAV file using go-audio/wav.
 // While paused, incoming samples are replaced with silence so the written
 // WAV preserves real-time duration.
+// The file is left open on return: the caller publishes or discards it, and the
+// deferred enc.Close must have rewritten the WAV size header before that
+// happens.
 func (r *Recorder) recordMono(ctx context.Context, reader io.Reader, f *os.File, sampleRate int) error {
-	defer f.Close()
-
 	enc := wav.NewEncoder(f, sampleRate, 16, 1, 1) // mono, PCM format=1
 	defer enc.Close()
 
@@ -261,9 +305,11 @@ type tryReader interface {
 // back to silence. The channels therefore stay sample-aligned across a stall.
 //
 // While paused, interleaved samples are zeroed on both channels.
+//
+// The file is left open on return: the caller publishes or discards it, and the
+// deferred enc.Close must have rewritten the WAV size header before that
+// happens.
 func (r *Recorder) recordStereo(ctx context.Context, left, right io.Reader, f *os.File, sampleRate int) error {
-	defer f.Close()
-
 	// One slot is one 20 ms tap frame, the cadence both tap writers emit at.
 	slotBytes := sampleRate / 50 * 2
 	if slotBytes <= 0 {

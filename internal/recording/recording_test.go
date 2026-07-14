@@ -61,6 +61,8 @@ func TestRecorder_StartStop(t *testing.T) {
 	if info.Size() == 0 {
 		t.Error("expected non-empty WAV file")
 	}
+	assertNoStagingResidue(t, dir)
+	assertPublishedMode(t, fpath)
 }
 
 func TestRecorder_DoubleStart(t *testing.T) {
