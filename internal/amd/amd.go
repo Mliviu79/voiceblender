@@ -86,33 +86,139 @@ const (
 	speechOffFrames = 4   // consecutive silent frames to confirm silence (80 ms)
 )
 
+// fsmState holds the mutable per-frame classification state. It is advanced
+// one 20 ms frame at a time through step, which is shared by the synchronous
+// Run core and the async Feed surface.
+type fsmState struct {
+	phase          phase
+	elapsed        time.Duration // total analysis time
+	initialSilence time.Duration // silence before first speech
+	greetingDur    time.Duration // cumulative speech duration
+	currentSilence time.Duration // current silence streak
+	currentSpeech  time.Duration // current speech streak
+	activeFrames   int           // consecutive voiced frames
+	silentFrames   int           // consecutive silent frames
+	speaking       bool          // debounced speech state
+}
+
+// step advances the classification FSM by one 20 ms frame of decoded samples.
+// It returns (Detection, true) once a terminal classification is reached, or
+// (zero, false) when more frames are needed. It never reads and never blocks.
+func (s *fsmState) step(params Params, samples []int16) (Detection, bool) {
+	rms := computeRMS(samples)
+	s.elapsed += frameDuration
+
+	// Update debounced voice activity state.
+	if rms >= speechThreshold {
+		s.activeFrames++
+		s.silentFrames = 0
+	} else {
+		s.silentFrames++
+		s.activeFrames = 0
+	}
+
+	wasSpeaking := s.speaking
+	if !s.speaking && s.activeFrames >= speechOnFrames {
+		s.speaking = true
+	} else if s.speaking && s.silentFrames >= speechOffFrames {
+		s.speaking = false
+	}
+
+	// Hard deadline check.
+	if s.elapsed >= params.TotalAnalysisTime {
+		return Detection{
+			Result:             ResultNotSure,
+			InitialSilenceMs:   ms(s.initialSilence),
+			GreetingDurationMs: ms(s.greetingDur),
+			TotalAnalysisMs:    ms(s.elapsed),
+		}, true
+	}
+
+	switch s.phase {
+	case phaseWaitingForSpeech:
+		if s.speaking {
+			s.phase = phaseInGreeting
+			s.currentSpeech = frameDuration
+			s.greetingDur = frameDuration
+		} else {
+			s.initialSilence += frameDuration
+			if s.initialSilence >= params.InitialSilenceTimeout {
+				return Detection{
+					Result:           ResultNoSpeech,
+					InitialSilenceMs: ms(s.initialSilence),
+					TotalAnalysisMs:  ms(s.elapsed),
+				}, true
+			}
+		}
+
+	case phaseInGreeting:
+		if s.speaking {
+			s.currentSpeech += frameDuration
+			s.greetingDur += frameDuration
+			s.currentSilence = 0
+
+			// Long continuous/cumulative speech → machine.
+			if s.greetingDur >= params.GreetingDuration {
+				return Detection{
+					Result:             ResultMachine,
+					InitialSilenceMs:   ms(s.initialSilence),
+					GreetingDurationMs: ms(s.greetingDur),
+					TotalAnalysisMs:    ms(s.elapsed),
+				}, true
+			}
+		} else {
+			// Transition from speaking to silent.
+			if wasSpeaking && !s.speaking {
+				// Only count the speech burst if it met minimum word length.
+				if s.currentSpeech < params.MinimumWordLength {
+					// Too short — treat as noise, don't count towards greeting.
+					s.greetingDur -= s.currentSpeech
+				}
+				s.currentSpeech = 0
+			}
+			s.currentSilence += frameDuration
+
+			// Silence after a short greeting → human.
+			if s.currentSilence >= params.AfterGreetingSilence {
+				if s.greetingDur > 0 {
+					return Detection{
+						Result:             ResultHuman,
+						InitialSilenceMs:   ms(s.initialSilence),
+						GreetingDurationMs: ms(s.greetingDur),
+						TotalAnalysisMs:    ms(s.elapsed),
+					}, true
+				}
+				// No qualifying speech was counted (all bursts too short).
+				// Fall back to waiting for speech, carrying forward silence.
+				s.phase = phaseWaitingForSpeech
+				s.initialSilence += s.currentSilence
+				s.currentSilence = 0
+			}
+		}
+
+	case phaseAfterGreetingSilence:
+		// This phase is handled inline in phaseInGreeting above via
+		// currentSilence tracking. Kept as a named constant for clarity.
+	}
+
+	return Detection{}, false
+}
+
 // Run blocks while reading 16 kHz 16-bit mono PCM from reader, analysing up
 // to TotalAnalysisTime of audio. It returns a Detection when a determination
 // is made or the context is cancelled.
 func (a *Analyzer) Run(ctx context.Context, reader io.Reader) Detection {
 	buf := make([]byte, frameSizeBytes)
 	samples := make([]int16, samplesPerFrame)
-
-	currentPhase := phaseWaitingForSpeech
-
-	var (
-		elapsed        time.Duration // total analysis time
-		initialSilence time.Duration // silence before first speech
-		greetingDur    time.Duration // cumulative speech duration
-		currentSilence time.Duration // current silence streak
-		currentSpeech  time.Duration // current speech streak
-		activeFrames   int           // consecutive voiced frames
-		silentFrames   int           // consecutive silent frames
-		speaking       bool          // debounced speech state
-	)
+	var st fsmState
 
 	for {
 		if ctx.Err() != nil {
 			return Detection{
 				Result:             ResultNotSure,
-				TotalAnalysisMs:    ms(elapsed),
-				InitialSilenceMs:   ms(initialSilence),
-				GreetingDurationMs: ms(greetingDur),
+				TotalAnalysisMs:    ms(st.elapsed),
+				InitialSilenceMs:   ms(st.initialSilence),
+				GreetingDurationMs: ms(st.greetingDur),
 			}
 		}
 
@@ -120,9 +226,9 @@ func (a *Analyzer) Run(ctx context.Context, reader io.Reader) Detection {
 		if err != nil {
 			return Detection{
 				Result:             ResultNotSure,
-				TotalAnalysisMs:    ms(elapsed),
-				InitialSilenceMs:   ms(initialSilence),
-				GreetingDurationMs: ms(greetingDur),
+				TotalAnalysisMs:    ms(st.elapsed),
+				InitialSilenceMs:   ms(st.initialSilence),
+				GreetingDurationMs: ms(st.greetingDur),
 			}
 		}
 
@@ -131,100 +237,8 @@ func (a *Analyzer) Run(ctx context.Context, reader io.Reader) Detection {
 			samples[i] = int16(binary.LittleEndian.Uint16(buf[i*2 : i*2+2]))
 		}
 
-		rms := computeRMS(samples)
-		elapsed += frameDuration
-
-		// Update debounced voice activity state.
-		if rms >= speechThreshold {
-			activeFrames++
-			silentFrames = 0
-		} else {
-			silentFrames++
-			activeFrames = 0
-		}
-
-		wasSpeaking := speaking
-		if !speaking && activeFrames >= speechOnFrames {
-			speaking = true
-		} else if speaking && silentFrames >= speechOffFrames {
-			speaking = false
-		}
-
-		// Hard deadline check.
-		if elapsed >= a.params.TotalAnalysisTime {
-			return Detection{
-				Result:             ResultNotSure,
-				InitialSilenceMs:   ms(initialSilence),
-				GreetingDurationMs: ms(greetingDur),
-				TotalAnalysisMs:    ms(elapsed),
-			}
-		}
-
-		switch currentPhase {
-		case phaseWaitingForSpeech:
-			if speaking {
-				currentPhase = phaseInGreeting
-				currentSpeech = frameDuration
-				greetingDur = frameDuration
-			} else {
-				initialSilence += frameDuration
-				if initialSilence >= a.params.InitialSilenceTimeout {
-					return Detection{
-						Result:           ResultNoSpeech,
-						InitialSilenceMs: ms(initialSilence),
-						TotalAnalysisMs:  ms(elapsed),
-					}
-				}
-			}
-
-		case phaseInGreeting:
-			if speaking {
-				currentSpeech += frameDuration
-				greetingDur += frameDuration
-				currentSilence = 0
-
-				// Long continuous/cumulative speech → machine.
-				if greetingDur >= a.params.GreetingDuration {
-					return Detection{
-						Result:             ResultMachine,
-						InitialSilenceMs:   ms(initialSilence),
-						GreetingDurationMs: ms(greetingDur),
-						TotalAnalysisMs:    ms(elapsed),
-					}
-				}
-			} else {
-				// Transition from speaking to silent.
-				if wasSpeaking && !speaking {
-					// Only count the speech burst if it met minimum word length.
-					if currentSpeech < a.params.MinimumWordLength {
-						// Too short — treat as noise, don't count towards greeting.
-						greetingDur -= currentSpeech
-					}
-					currentSpeech = 0
-				}
-				currentSilence += frameDuration
-
-				// Silence after a short greeting → human.
-				if currentSilence >= a.params.AfterGreetingSilence {
-					if greetingDur > 0 {
-						return Detection{
-							Result:             ResultHuman,
-							InitialSilenceMs:   ms(initialSilence),
-							GreetingDurationMs: ms(greetingDur),
-							TotalAnalysisMs:    ms(elapsed),
-						}
-					}
-					// No qualifying speech was counted (all bursts too short).
-					// Fall back to waiting for speech, carrying forward silence.
-					currentPhase = phaseWaitingForSpeech
-					initialSilence += currentSilence
-					currentSilence = 0
-				}
-			}
-
-		case phaseAfterGreetingSilence:
-			// This phase is handled inline in phaseInGreeting above via
-			// currentSilence tracking. Kept as a named constant for clarity.
+		if det, done := st.step(a.params, samples); done {
+			return det
 		}
 	}
 }
