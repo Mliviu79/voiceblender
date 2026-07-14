@@ -229,13 +229,17 @@ func (s *Server) resolveStorage(req RecordRequest) (storage.Backend, error) {
 			if region == "" {
 				region = "us-east-1"
 			}
+			// The insecure-endpoint escape hatch is an operator-level trust
+			// decision, not a caller-supplied one: a per-request field would let
+			// any API caller downgrade the transport.
 			backend, err := storage.NewS3Backend(context.Background(), storage.S3Config{
-				Bucket:    req.S3Bucket,
-				Region:    region,
-				Endpoint:  req.S3Endpoint,
-				Prefix:    req.S3Prefix,
-				AccessKey: req.S3AccessKey,
-				SecretKey: req.S3SecretKey,
+				Bucket:        req.S3Bucket,
+				Region:        region,
+				Endpoint:      req.S3Endpoint,
+				Prefix:        req.S3Prefix,
+				AccessKey:     req.S3AccessKey,
+				SecretKey:     req.S3SecretKey,
+				AllowInsecure: s.Config.S3AllowInsecureEndpoint,
 			})
 			if err != nil {
 				return nil, fmt.Errorf("create S3 backend: %w", err)
