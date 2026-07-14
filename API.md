@@ -3488,7 +3488,16 @@ Returns Prometheus-format metrics for the VoiceBlender instance. No request body
 | `voiceblender_disconnect_reasons_total` | Counter | `type`, `reason` | Total disconnected legs by type and reason (e.g. `remote_bye`, `api_hangup`, `rtp_timeout`) |
 | `voiceblender_call_duration_seconds` | Histogram | `type` | Answered call duration (time from answer to hangup). Use `rate(sum)/rate(count)` for ACD |
 | `voiceblender_call_total_duration_seconds` | Histogram | `type` | Total leg lifetime including ringing time (time from leg creation to hangup) |
+| `voiceblender_webhook_enqueued_total` | Counter | — | Total events accepted onto the webhook delivery queue. Denominator for the drop ratio |
+| `voiceblender_webhook_dropped_total` | Counter | — | Total events dropped because the webhook delivery queue was full (backpressure) |
+| `voiceblender_webhook_deliveries_total` | Counter | `outcome` | Total terminal webhook delivery outcomes. `outcome`: `success`, `exhausted` (all 3 attempts failed), `marshal_error`, `request_error` (malformed webhook URL). Closed set, so cardinality is fixed at 4 |
+| `voiceblender_vsi_events_dropped_total` | Counter | — | Total events dropped because a VSI WebSocket client's buffer was full (slow consumer) |
 | Go runtime metrics | — | — | Standard `go_*` and `process_*` metrics from the Prometheus Go client |
+
+Every delivery that reaches a terminal exit increments exactly one
+`voiceblender_webhook_deliveries_total{outcome}`. This is not a global
+`enqueued == sum(outcomes)` identity: jobs still queued at shutdown are
+abandoned without an outcome, so a small, shutdown-only skew is expected.
 
 #### PromQL Examples
 
