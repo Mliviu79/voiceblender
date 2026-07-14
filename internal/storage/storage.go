@@ -2,15 +2,42 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
+
+// Errors returned by NewS3Backend when the target store is unusable.
+var (
+	// ErrBucketMissing reports that the configured bucket does not exist or is
+	// not visible to the supplied credentials.
+	ErrBucketMissing = errors.New("s3 bucket does not exist")
+	// ErrInsecureEndpoint reports that the configured endpoint would ship
+	// recording audio over plaintext HTTP.
+	ErrInsecureEndpoint = errors.New("s3 endpoint is plaintext http")
+)
+
+// bucketPreflightTimeout bounds the bucket-existence probe performed at
+// backend construction, so a black-holed endpoint cannot stall boot or an
+// API request indefinitely.
+const bucketPreflightTimeout = 10 * time.Second
+
+// endpointIsInsecure reports whether the endpoint explicitly requests
+// plaintext HTTP. Only an explicit "http://" scheme is classified as
+// insecure: an empty endpoint means the SDK default (AWS, always TLS), and a
+// scheme-less endpoint such as "minio.internal:9000" cannot be classified, so
+// both fail open and are accepted.
+func endpointIsInsecure(endpoint string) bool {
+	return strings.HasPrefix(strings.ToLower(endpoint), "http://")
+}
 
 // Backend abstracts where a recording file is stored after capture.
 type Backend interface {
