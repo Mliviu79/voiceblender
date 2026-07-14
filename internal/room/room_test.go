@@ -26,6 +26,7 @@ type mockLeg struct {
 	writer         io.Writer
 	createdAt      time.Time
 	disconnectDone atomic.Bool
+	panicOnHangup  bool
 }
 
 func newMockLeg(id string) *mockLeg {
@@ -45,35 +46,41 @@ func (m *mockLeg) AudioReader() io.Reader                       { return m.reade
 func (m *mockLeg) AudioWriter() io.Writer                       { return m.writer }
 func (m *mockLeg) OnDTMF(func(digit rune))                      {}
 func (m *mockLeg) SendDTMF(ctx context.Context, d string) error { return nil }
-func (m *mockLeg) Hangup(ctx context.Context) error             { m.state = leg.StateHungUp; return nil }
-func (m *mockLeg) Answer(ctx context.Context) error             { return nil }
-func (m *mockLeg) Context() context.Context                     { return context.Background() }
-func (m *mockLeg) RoomID() string                               { return m.roomID }
-func (m *mockLeg) SetRoomID(id string)                          { m.roomID = id }
-func (m *mockLeg) AppID() string                                { return "" }
-func (m *mockLeg) SetAppID(string)                              {}
-func (m *mockLeg) Role() string                                 { return m.role }
-func (m *mockLeg) SetRole(r string)                             { m.role = r }
-func (m *mockLeg) IsMuted() bool                                { return m.muted }
-func (m *mockLeg) SetMuted(v bool)                              { m.muted = v }
-func (m *mockLeg) IsDeaf() bool                                 { return m.deaf }
-func (m *mockLeg) SetDeaf(v bool)                               { m.deaf = v }
-func (m *mockLeg) AcceptDTMF() bool                             { return m.acceptDTMF }
-func (m *mockLeg) SetAcceptDTMF(v bool)                         { m.acceptDTMF = v }
-func (m *mockLeg) OnTextReceived(func(string, bool))            {}
-func (m *mockLeg) SendText(context.Context, string) error       { return leg.ErrRTTNotNegotiated }
-func (m *mockLeg) AcceptText() bool                             { return false }
-func (m *mockLeg) SetAcceptText(bool)                           {}
-func (m *mockLeg) RTTNegotiated() bool                          { return false }
-func (m *mockLeg) SetSpeakingTap(w io.Writer)                   {}
-func (m *mockLeg) ClearSpeakingTap()                            {}
-func (m *mockLeg) IsHeld() bool                                 { return false }
-func (m *mockLeg) CreatedAt() time.Time                         { return m.createdAt }
-func (m *mockLeg) AnsweredAt() time.Time                        { return time.Time{} }
-func (m *mockLeg) SIPHeaders() map[string]string                { return nil }
-func (m *mockLeg) Headers() map[string]string                   { return nil }
-func (m *mockLeg) RTPStats() leg.RTPStats                       { return leg.RTPStats{} }
-func (m *mockLeg) ClaimDisconnect() bool                        { return m.disconnectDone.CompareAndSwap(false, true) }
+func (m *mockLeg) Hangup(ctx context.Context) error {
+	if m.panicOnHangup {
+		panic("simulated hangup panic")
+	}
+	m.state = leg.StateHungUp
+	return nil
+}
+func (m *mockLeg) Answer(ctx context.Context) error       { return nil }
+func (m *mockLeg) Context() context.Context               { return context.Background() }
+func (m *mockLeg) RoomID() string                         { return m.roomID }
+func (m *mockLeg) SetRoomID(id string)                    { m.roomID = id }
+func (m *mockLeg) AppID() string                          { return "" }
+func (m *mockLeg) SetAppID(string)                        {}
+func (m *mockLeg) Role() string                           { return m.role }
+func (m *mockLeg) SetRole(r string)                       { m.role = r }
+func (m *mockLeg) IsMuted() bool                          { return m.muted }
+func (m *mockLeg) SetMuted(v bool)                        { m.muted = v }
+func (m *mockLeg) IsDeaf() bool                           { return m.deaf }
+func (m *mockLeg) SetDeaf(v bool)                         { m.deaf = v }
+func (m *mockLeg) AcceptDTMF() bool                       { return m.acceptDTMF }
+func (m *mockLeg) SetAcceptDTMF(v bool)                   { m.acceptDTMF = v }
+func (m *mockLeg) OnTextReceived(func(string, bool))      {}
+func (m *mockLeg) SendText(context.Context, string) error { return leg.ErrRTTNotNegotiated }
+func (m *mockLeg) AcceptText() bool                       { return false }
+func (m *mockLeg) SetAcceptText(bool)                     {}
+func (m *mockLeg) RTTNegotiated() bool                    { return false }
+func (m *mockLeg) SetSpeakingTap(w io.Writer)             {}
+func (m *mockLeg) ClearSpeakingTap()                      {}
+func (m *mockLeg) IsHeld() bool                           { return false }
+func (m *mockLeg) CreatedAt() time.Time                   { return m.createdAt }
+func (m *mockLeg) AnsweredAt() time.Time                  { return time.Time{} }
+func (m *mockLeg) SIPHeaders() map[string]string          { return nil }
+func (m *mockLeg) Headers() map[string]string             { return nil }
+func (m *mockLeg) RTPStats() leg.RTPStats                 { return leg.RTPStats{} }
+func (m *mockLeg) ClaimDisconnect() bool                  { return m.disconnectDone.CompareAndSwap(false, true) }
 
 func newTestBus() *events.Bus  { return events.NewBus("test") }
 func newTestLog() *slog.Logger { return slog.Default() }
