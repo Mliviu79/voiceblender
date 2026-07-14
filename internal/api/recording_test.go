@@ -1,8 +1,15 @@
 package api
 
 import (
+	"context"
+	"encoding/binary"
 	"io"
+	"log/slog"
+	"os"
 	"testing"
+	"time"
+
+	"github.com/VoiceBlender/voiceblender/internal/recording"
 )
 
 // TestPipeReader_TryRead covers the non-blocking read contract: nothing ready
@@ -92,4 +99,74 @@ func TestPipeReader_TryRead(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestStartStereo_CompanionAudioReachesLeftChannel wires the real recording
+// pipes into the real stereo recorder, which is the linkage the recording
+// package's own tests cannot cover: they stand in their own pipe double, so
+// they would stay green if this pipe stopped satisfying the recorder's
+// non-blocking-read requirement and every recording's left channel silently
+// went mute.
+func TestStartStereo_CompanionAudioReachesLeftChannel(t *testing.T) {
+	const (
+		rate         = 8000
+		slotBytes    = rate / 50 * 2 // one 20 ms frame, as the taps emit
+		nFrames      = 8
+		masterSample = int16(0x2222)
+		compSample   = int16(0x1111)
+	)
+
+	frameOf := func(v int16) []byte {
+		b := make([]byte, slotBytes)
+		for i := 0; i+1 < len(b); i += 2 {
+			binary.LittleEndian.PutUint16(b[i:], uint16(v))
+		}
+		return b
+	}
+
+	dir := t.TempDir()
+	// Exactly the wiring doStartRecordLeg uses for a standalone SIP leg.
+	leftPR, leftPW := createPipe()
+	rightPR, rightPW := createPipe()
+
+	rec := recording.NewRecorder(slog.Default())
+	fpath, err := rec.StartStereo(context.Background(), leftPR, rightPR, dir, rate)
+	if err != nil {
+		t.Fatalf("StartStereo: %v", err)
+	}
+
+	for k := 0; k < nFrames; k++ {
+		leftPW.Write(frameOf(compSample))
+		rightPW.Write(frameOf(masterSample))
+	}
+	// Let the recorder drain before the close races the queued frames.
+	time.Sleep(200 * time.Millisecond)
+	leftPW.Close()
+	rightPW.Close()
+	rec.Wait()
+
+	data, err := os.ReadFile(fpath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if len(data) < 44 {
+		t.Fatalf("WAV is %d bytes: the recorder wrote nothing, so it rejected these pipes", len(data))
+	}
+	pcm := data[44:]
+
+	var sawMaster, sawCompanion bool
+	for i := 0; i+3 < len(pcm); i += 4 {
+		if int16(binary.LittleEndian.Uint16(pcm[i:])) == compSample {
+			sawCompanion = true
+		}
+		if int16(binary.LittleEndian.Uint16(pcm[i+2:])) == masterSample {
+			sawMaster = true
+		}
+	}
+	if !sawMaster {
+		t.Error("right channel carries no master audio: the paced pipe is not clocking the recorder")
+	}
+	if !sawCompanion {
+		t.Error("left channel is silent: audio written to the companion pipe never reached the recording")
+	}
 }
