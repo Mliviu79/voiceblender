@@ -286,6 +286,54 @@ func (r *Recorder) recordStereo(ctx context.Context, left, right io.Reader, f *o
 	}
 }
 
+// companionMaxSlots bounds the companion accumulator at 16 slots (~320 ms of
+// audio). The companion only builds a backlog when it briefly outruns the
+// master clock; anything past this is stale enough that keeping it would just
+// push the whole channel late for the rest of the call.
+const companionMaxSlots = 16
+
+// companionBuffer accumulates companion-channel bytes between master frames.
+// It is bounded: once it holds more than maxSlots whole slots the oldest slot
+// is dropped, so a companion that outruns the master clock loses its stalest
+// audio instead of growing without limit.
+//
+// It is not safe for concurrent use; the recording loop owns it.
+type companionBuffer struct {
+	buf       []byte
+	slotBytes int
+	maxSlots  int
+}
+
+func newCompanionBuffer(slotBytes, maxSlots int) *companionBuffer {
+	return &companionBuffer{slotBytes: slotBytes, maxSlots: maxSlots}
+}
+
+// append adds b, dropping whole slots from the front while over the bound.
+func (c *companionBuffer) append(b []byte) {
+	c.buf = append(c.buf, b...)
+	bound := c.maxSlots * c.slotBytes
+	for len(c.buf) > bound {
+		c.buf = c.buf[c.slotBytes:]
+	}
+}
+
+// pop removes and returns the oldest whole slot. It reports false when a full
+// slot is not available, which is the caller's cue to emit silence instead.
+//
+// The returned slot aliases the buffer and stays valid until the next append;
+// callers consume it before accumulating more.
+func (c *companionBuffer) pop() ([]byte, bool) {
+	if len(c.buf) < c.slotBytes {
+		return nil, false
+	}
+	slot := c.buf[:c.slotBytes]
+	c.buf = c.buf[c.slotBytes:]
+	return slot, true
+}
+
+// size reports how many bytes are currently held.
+func (c *companionBuffer) size() int { return len(c.buf) }
+
 // zeroInts sets every element of s to 0.
 func zeroInts(s []int) {
 	for i := range s {
