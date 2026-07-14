@@ -444,7 +444,7 @@ func eventMessage(ev api.EventMeta) *omap {
 		set("name", eventMsgName(string(ev.Type))).
 		set("title", ev.Summary).
 		set("summary", ev.Summary).
-		set("description", "Event payload shape is documented in openapi.yaml under x-webhooks/"+string(ev.Type)+". Full envelope: {type, timestamp, instance_id, ...event-specific fields}.").
+		set("description", "Event payload shape is documented in openapi.yaml under x-webhooks/"+string(ev.Type)+". Full envelope: {type, timestamp, event_id, instance_id, ...event-specific fields}.").
 		set("payload", newMap().set("$ref", openapiPath))
 }
 
