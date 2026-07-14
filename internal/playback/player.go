@@ -36,6 +36,10 @@ type Player struct {
 	log     *slog.Logger
 	onStart func()       // called once when streaming actually begins (after successful fetch)
 	volume  atomic.Int32 // -8..8, 0 = unchanged; atomic so SetVolume is safe during playback
+	// playedFrames counts output frames written by the current playback. Reset at
+	// the start of every play; atomic because the streaming goroutine writes it
+	// while PlayedMillis reads it.
+	playedFrames atomic.Int64
 }
 
 func NewPlayer(log *slog.Logger) *Player {
@@ -52,6 +56,13 @@ func (p *Player) SetVolume(v int) {
 		v = 8
 	}
 	p.volume.Store(int32(v))
+}
+
+// PlayedMillis returns how much audio the current or most recent playback wrote,
+// in milliseconds. Every output frame is exactly mixer.Ptime of audio. Read it
+// after the Play call returns to get the final total.
+func (p *Player) PlayedMillis() int {
+	return int(p.playedFrames.Load()) * mixer.Ptime
 }
 
 // OnStart registers a callback that fires once when audio streaming begins,
@@ -118,6 +129,8 @@ func (p *Player) playReader(ctx context.Context, writer io.Writer, reader io.Rea
 		p.mu.Unlock()
 	}()
 
+	p.playedFrames.Store(0)
+
 	format := detectFormat("", mimeType, reader)
 
 	if p.onStart != nil {
@@ -151,6 +164,9 @@ func (p *Player) playAt(ctx context.Context, writer io.Writer, url string, mimeT
 		p.cancel = nil
 		p.mu.Unlock()
 	}()
+
+	// Reset before the download so the count spans every repeat iteration.
+	p.playedFrames.Store(0)
 
 	// Normalize: 0 means play once.
 	if repeat == 0 {
@@ -405,6 +421,7 @@ func (p *Player) streamRawPCM(ctx context.Context, body io.Reader, writer io.Wri
 			return fmt.Errorf("write audio: %w", werr)
 		}
 		frameCount++
+		p.playedFrames.Add(1)
 
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			p.log.Info("raw PCM playback complete", "frames_written", frameCount)
@@ -487,6 +504,7 @@ func (p *Player) streamMP3(ctx context.Context, body io.Reader, writer io.Writer
 			return fmt.Errorf("write audio: %w", werr)
 		}
 		frameCount++
+		p.playedFrames.Add(1)
 
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			p.log.Info("MP3 playback complete", "frames_written", frameCount)
@@ -678,6 +696,7 @@ func (p *Player) streamWAV(ctx context.Context, body io.Reader, writer io.Writer
 			return fmt.Errorf("write audio: %w", werr)
 		}
 		frameCount++
+		p.playedFrames.Add(1)
 
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			p.log.Info("WAV playback complete", "frames_written", frameCount)
