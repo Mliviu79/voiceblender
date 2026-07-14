@@ -179,6 +179,7 @@ func main() {
 
 	// Prometheus metrics collector
 	metricsCollector := metrics.New(bus)
+	webhookReg.SetMetricsObserver(metricsCollector)
 
 	// HTTP API server
 	allowedIPs, err := api.ParseAllowedIPs(cfg.AllowedIPs)
