@@ -181,12 +181,14 @@ func TestMixer_WriteLoopPanicRemovesParticipant(t *testing.T) {
 	}
 }
 
-// TestMixer_MixTickPanicSkipsTickNotRoom is the load-bearing assertion that
-// mixTick is recovered per-tick (via safeMixTick), not by a defer wrapped
-// around mixLoop. It drives safeMixTick directly: a panic on the first call
-// must be swallowed with no output produced for that tick, and the very
-// next call must complete normally and produce output — proving the mix
-// loop itself was never unwound.
+// TestMixer_MixTickPanicSkipsTickNotRoom asserts the per-tick contract in
+// isolation: a panic on one call is swallowed with no output for that tick,
+// and the very next call completes normally and produces output.
+//
+// It calls safeMixTick directly, so it says nothing about whether mixLoop
+// actually routes its ticker case through safeMixTick — rewiring the ticker
+// to a bare mixTick() would leave this test green while the process regained
+// its crash. TestMixer_MixLoopTickerPanicKeepsRoomRunning covers that.
 func TestMixer_MixTickPanicSkipsTickNotRoom(t *testing.T) {
 	m := New(testLog(), DefaultSampleRate)
 
@@ -238,6 +240,46 @@ func TestMixer_MixTickPanicSkipsTickNotRoom(t *testing.T) {
 		}
 	default:
 		t.Fatal("expected output on the tick after recovery")
+	}
+}
+
+// TestMixer_MixLoopTickerPanicKeepsRoomRunning drives the real mix loop —
+// Start(), the real 20ms ticker, a panic on a real tick — rather than
+// calling safeMixTick by hand. This is what pins mixLoop's ticker case to
+// safeMixTick: if it were rewired to a bare mixTick(), the panic would
+// unwind mixLoop and take the process down with it, so this test cannot
+// pass without the recover actually being on the live path.
+func TestMixer_MixLoopTickerPanicKeepsRoomRunning(t *testing.T) {
+	m := New(testLog(), DefaultSampleRate)
+
+	fsz := m.frameSizeBytes
+	capture := &captureWriter{}
+	m.AddParticipant("listener", &silenceReader{frame: make([]byte, fsz)}, capture)
+
+	// tap.Write runs early in mixTick, before any output is produced, so the
+	// tick that hits it is skipped whole.
+	panicTap := &panicOnceWriter{}
+	m.SetParticipantTap("listener", panicTap)
+
+	m.Start()
+	defer m.Stop()
+
+	waitFor(t, 2*time.Second, "a real ticker tick to reach the panicking tap", func() bool {
+		return panicTap.fired.Load()
+	})
+	waitFor(t, 2*time.Second, "recoverTick to record the tick panic", func() bool {
+		return m.tickPanics.Load() >= 1
+	})
+
+	// Baseline after the panicking tick: any growth from here is produced by
+	// ticks the loop ran *after* it recovered.
+	before := len(capture.Bytes())
+	waitFor(t, 2*time.Second, "a later ticker tick to still produce output", func() bool {
+		return len(capture.Bytes()) > before
+	})
+
+	if got := m.ParticipantCount(); got != 1 {
+		t.Errorf("participant count = %d, want 1 — a tick panic must not evict anyone", got)
 	}
 }
 
