@@ -181,15 +181,19 @@ func TestMixer_WriteLoopPanicRemovesParticipant(t *testing.T) {
 	}
 }
 
-// TestMixer_MixTickPanicSkipsTickNotRoom asserts the per-tick contract in
-// isolation: a panic on one call is swallowed with no output for that tick,
-// and the very next call completes normally and produces output.
+// TestMixer_SafeMixTickRecoversAndContinues asserts the per-tick contract of
+// safeMixTick in isolation: a panic on one call is swallowed with no output
+// for that tick, and the very next call completes normally and produces
+// output. Calling safeMixTick directly keeps this deterministic — no ticker,
+// no timing.
 //
-// It calls safeMixTick directly, so it says nothing about whether mixLoop
-// actually routes its ticker case through safeMixTick — rewiring the ticker
-// to a bare mixTick() would leave this test green while the process regained
-// its crash. TestMixer_MixLoopTickerPanicKeepsRoomRunning covers that.
-func TestMixer_MixTickPanicSkipsTickNotRoom(t *testing.T) {
+// Scope, deliberately: this covers the helper, NOT the room-survival
+// guarantee. It says nothing about whether mixLoop routes its ticker case
+// through safeMixTick — rewiring the ticker to a bare mixTick() leaves this
+// test green while the process regains its crash. That wiring is what
+// TestMixer_MixLoopTickerPanicKeepsRoomRunning exists to catch; do not read
+// a green result here as proof the room survives.
+func TestMixer_SafeMixTickRecoversAndContinues(t *testing.T) {
 	m := New(testLog(), DefaultSampleRate)
 
 	fsz := m.frameSizeBytes
