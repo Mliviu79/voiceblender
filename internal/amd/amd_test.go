@@ -660,6 +660,84 @@ func TestAnalyzer_MachineNoBeepTimeout(t *testing.T) {
 	}
 }
 
+// feedBeepChunked drives the push-mode beep surface with audio delivered in
+// chunkSize-byte chunks, returning the first terminal BeepResult.
+func feedBeepChunked(a *Analyzer, audio []byte, chunkSize int) (BeepResult, bool) {
+	for off := 0; off < len(audio); off += chunkSize {
+		end := off + chunkSize
+		if end > len(audio) {
+			end = len(audio)
+		}
+		if beep, done := a.FeedBeep(audio[off:end]); done {
+			return beep, true
+		}
+	}
+	return BeepResult{}, false
+}
+
+func TestAnalyzer_FeedBeep(t *testing.T) {
+	silent := makeSilentFrame()
+	beepTone := makeSineFrame(1000, 10000)
+
+	t.Run("detects a beep tone", func(t *testing.T) {
+		params := DefaultParams()
+		params.BeepTimeout = 3000 * time.Millisecond
+
+		// 200 ms gap, then 200 ms of 1000 Hz beep (well over the 4-frame minimum).
+		audio := buildAudio(silent, 10, beepTone, 10, silent, 10)
+
+		beep, done := feedBeepChunked(New(params), audio, frameSizeBytes)
+		if !done {
+			t.Fatal("expected a terminal beep result")
+		}
+		if !beep.Detected {
+			t.Fatal("expected beep to be detected")
+		}
+		if beep.BeepMs <= 0 {
+			t.Errorf("beep_ms=%d, want > 0", beep.BeepMs)
+		}
+	})
+
+	t.Run("terminates at BeepTimeout without a beep", func(t *testing.T) {
+		params := DefaultParams()
+		params.BeepTimeout = 500 * time.Millisecond
+
+		// 600 ms of silence — outlasts the beep timeout with no tone present.
+		audio := buildAudio(silent, framesForDuration(600*time.Millisecond))
+
+		beep, done := feedBeepChunked(New(params), audio, frameSizeBytes)
+		if !done {
+			t.Fatal("expected FeedBeep to terminate at the beep timeout")
+		}
+		if beep.Detected {
+			t.Fatal("expected no beep detection (timeout)")
+		}
+	})
+
+	t.Run("matches WaitForBeep across chunkings", func(t *testing.T) {
+		params := DefaultParams()
+		params.BeepTimeout = 3000 * time.Millisecond
+		audio := buildAudio(silent, 10, beepTone, 10, silent, 10)
+
+		want := New(params).WaitForBeep(context.Background(), bytes.NewReader(audio))
+		if !want.Detected {
+			t.Fatalf("WaitForBeep: expected beep to be detected")
+		}
+
+		for _, chunk := range []int{1, frameSizeBytes, 1000, len(audio)} {
+			t.Run(fmt.Sprintf("chunk_%d", chunk), func(t *testing.T) {
+				got, done := feedBeepChunked(New(params), audio, chunk)
+				if !done {
+					t.Fatal("expected a terminal beep result")
+				}
+				if got != want {
+					t.Errorf("FeedBeep result %+v != WaitForBeep result %+v", got, want)
+				}
+			})
+		}
+	})
+}
+
 func TestAnalyzer_MachineBeepDisabled(t *testing.T) {
 	params := DefaultParams()
 	params.GreetingDuration = 500 * time.Millisecond
