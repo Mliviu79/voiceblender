@@ -1188,10 +1188,6 @@ type amdDriver struct {
 	mu      sync.Mutex
 	beeping bool // classified as machine; now waiting for the voicemail beep
 	done    bool // terminal state reached; later frames are ignored
-
-	// resultOnce gates the terminal classification event, which the readLoop
-	// and watch race to publish. Exactly one amd.result is emitted per call.
-	resultOnce sync.Once
 }
 
 // Write feeds decoded PCM into the analyzer. It runs on the leg's readLoop, so
@@ -1283,17 +1279,16 @@ func (d *amdDriver) watch(ctx context.Context, budget time.Duration) {
 	}
 }
 
-// publishResult emits the terminal classification at most once, whichever of
-// the readLoop or watch reaches it first.
+// publishResult emits the terminal classification. Its caller is elected by the
+// done flag under d.mu, whichever of the readLoop or watch reaches it first, so
+// exactly one amd.result is emitted per call.
 func (d *amdDriver) publishResult(det amd.Detection) {
-	d.resultOnce.Do(func() {
-		d.s.Bus.Publish(events.AMDResult, &events.AMDResultData{
-			LegScope:           events.LegScope{LegID: d.l.ID(), AppID: d.l.AppID()},
-			Result:             string(det.Result),
-			InitialSilenceMs:   det.InitialSilenceMs,
-			GreetingDurationMs: det.GreetingDurationMs,
-			TotalAnalysisMs:    det.TotalAnalysisMs,
-		})
+	d.s.Bus.Publish(events.AMDResult, &events.AMDResultData{
+		LegScope:           events.LegScope{LegID: d.l.ID(), AppID: d.l.AppID()},
+		Result:             string(det.Result),
+		InitialSilenceMs:   det.InitialSilenceMs,
+		GreetingDurationMs: det.GreetingDurationMs,
+		TotalAnalysisMs:    det.TotalAnalysisMs,
 	})
 }
 

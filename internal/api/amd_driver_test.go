@@ -100,8 +100,8 @@ func newAMDTestDriver(s *Server, l *amdFakeLeg, params amd.Params) *amdDriver {
 // TestAMDDriver_PublishesExactlyOneResultUnderConcurrency drives Feed from the
 // readLoop's role while the deadline goroutine fires OnDeadline concurrently.
 // Under -race this proves the mutex serializes the analyzer; the count proves
-// the sync.Once gates the terminal publish so the leak fix cannot trade itself
-// for a duplicate amd.result.
+// the done flag under d.mu elects a single publisher, so the leak fix cannot
+// trade itself for a duplicate amd.result.
 func TestAMDDriver_PublishesExactlyOneResultUnderConcurrency(t *testing.T) {
 	params := amd.DefaultParams()
 	params.GreetingDuration = 200 * time.Millisecond // reachable mid-feed
@@ -334,6 +334,51 @@ func TestAMDDriver_MachineKeepsTapUntilBeepResolves(t *testing.T) {
 			t.Error("tap should be cleared once the beep window times out")
 		}
 	})
+}
+
+// TestAMDDriver_BeepWindowDeadlinePublishesNothing covers the stalled beep
+// window, which the single watch timer exists to bound: FeedBeep's own timeout
+// only advances as frames arrive, so an RTP stall mid-window leaves the budget
+// as the only terminator. The machine verdict was already published when the
+// window opened, so the budget expiring must drop the tap without republishing.
+func TestAMDDriver_BeepWindowDeadlinePublishesNothing(t *testing.T) {
+	s := newTestServer(t)
+	rec := recordAMDEvents(t, s)
+	l := &amdFakeLeg{}
+
+	params := amd.DefaultParams()
+	params.GreetingDuration = 500 * time.Millisecond
+	params.TotalAnalysisTime = 5000 * time.Millisecond
+	params.BeepTimeout = 3000 * time.Millisecond
+	d := newAMDTestDriver(s, l, params)
+
+	// 600 ms of speech crosses the 500 ms greeting threshold → machine, which
+	// opens the beep window and keeps the tap installed.
+	speech := amdSpeechFrame()
+	for i := 0; i < 30; i++ {
+		if _, err := d.Write(speech); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	if got := rec.count(events.AMDResult); got != 1 {
+		t.Fatalf("expected the machine verdict to publish, got %d amd.result", got)
+	}
+	if l.clearedCount() != 0 {
+		t.Fatal("tap must stay installed through the beep window")
+	}
+
+	// The feed stalls mid-beep-window: only the budget can end this.
+	d.watch(context.Background(), 0)
+
+	if got := rec.count(events.AMDResult); got != 1 {
+		t.Errorf("beep-window deadline must not republish a result, got %d", got)
+	}
+	if got := rec.count(events.AMDBeep); got != 0 {
+		t.Errorf("expected no amd.beep when the window expires unresolved, got %d", got)
+	}
+	if l.clearedCount() == 0 {
+		t.Error("expected the tap to be cleared once the beep window expires")
+	}
 }
 
 // TestAMDDriver_DeadlinePublishesAccumulatedVerdict covers the stalled-RTP
