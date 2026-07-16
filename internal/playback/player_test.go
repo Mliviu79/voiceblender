@@ -891,6 +891,21 @@ func TestRepeat_ThreePlaysThreeTimes(t *testing.T) {
 	if output.Len() != 320*3 {
 		t.Errorf("output size = %d, want %d", output.Len(), 320*3)
 	}
+	// The count accumulates across every repeat iteration rather than resetting
+	// per iteration: 3 iterations x one 20ms frame.
+	if got := p.PlayedMillis(); got != 60 {
+		t.Errorf("PlayedMillis() = %d, want 60 (3 iterations x one 20ms frame)", got)
+	}
+
+	// Replaying on the same Player resets the count instead of accumulating
+	// across plays.
+	output.Reset()
+	if err := p.PlayAt8kHz(context.Background(), &output, ts.URL+"/audio.wav", "audio/wav", 1); err != nil {
+		t.Fatalf("second play: unexpected error: %v", err)
+	}
+	if got := p.PlayedMillis(); got != 20 {
+		t.Errorf("PlayedMillis() after second play = %d, want 20 - counter did not reset", got)
+	}
 }
 
 func TestRepeat_InfiniteStopsOnCancel(t *testing.T) {
