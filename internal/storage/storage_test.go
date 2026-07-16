@@ -46,8 +46,8 @@ func TestEndpointIsInsecure(t *testing.T) {
 		{"tls", "https://s3.example.com", false},
 		{"tls mixed case", "HTTPS://s3.example.com", false},
 		{"empty means SDK default, always tls", "", false},
-		// Cannot be classified, so it fails open rather than blocking a
-		// working deployment.
+		// Cannot be classified by the guard; the SDK rejects it at the
+		// preflight as an invalid URI.
 		{"scheme-less", "minio.internal:9000", false},
 	}
 	for _, tt := range tests {
