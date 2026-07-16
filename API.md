@@ -2118,6 +2118,21 @@ Multi-channel recording — includes a single multi-channel WAV with channel met
 | `channels[].channel` | integer | Zero-based channel index in the multi-channel WAV |
 | `channels[].start_ms` | integer | Milliseconds from recording start when this participant joined |
 | `channels[].end_ms` | integer | Milliseconds from recording start when this participant's audio ends |
+| `omitted_legs` | array | Leg IDs that took part but are absent from `multi_channel_file`, because capturing them failed. Omitted entirely when the recording is complete. |
+
+A participant whose capture fails is left out of the merge rather than failing
+the whole room: the other participants' audio is still produced, and the legs
+that were lost are named in `omitted_legs`. Those leg IDs have no entry in
+`channels`, and the remaining channel indices are contiguous — a channel index
+is only meaningful via `channels`, never by position. If **every** participant's
+capture fails there is nothing to merge, and the response carries neither
+`multi_channel_file` nor `channels` (the failure is logged server-side; the stop
+itself still succeeds and returns the full-mix `file`).
+
+Whether a partial recording is acceptable is the caller's decision, so check
+`omitted_legs` before treating `multi_channel_file` as a complete record of the
+room. Treat a missing `multi_channel_file` on a `multi_channel: true` recording
+the same way — as a failure to produce one, not as an empty room.
 
 **Errors:** `404` — No recording in progress
 
@@ -2871,7 +2886,7 @@ All event data uses typed structs with consistent field names. Events scoped to 
 | `tts.finished` | TTS synthesis finished playing | `leg_id` or `room_id`, `tts_id` |
 | `tts.error` | TTS synthesis or playback failed | `leg_id` or `room_id`, `tts_id`, `error` |
 | `recording.started` | Recording began | `leg_id` or `room_id`, `file` (does not exist yet — the path only appears when the recording stops) |
-| `recording.finished` | Recording ended | `leg_id` or `room_id`, `file`, `multi_channel_file`, `channels` (multi-channel only) |
+| `recording.finished` | Recording ended | `leg_id` or `room_id`, `file`, `multi_channel_file`, `channels`, `omitted_legs` (multi-channel only; `omitted_legs` only when a participant's capture failed) |
 | `recording.paused` | Recording paused (audio replaced with silence) | `leg_id` or `room_id` |
 | `recording.resumed` | Recording resumed from a paused state | `leg_id` or `room_id` |
 | `stt.text` | Speech-to-text transcript | `leg_id`, `room_id` (if room STT), `text`, `is_final` |

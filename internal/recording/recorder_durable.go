@@ -42,7 +42,13 @@ func createStagedFile(finalPath string) (*stagedFile, error) {
 //
 // The caller must have finished writing — including any trailing header rewrite
 // — before calling this, because the sync here is what puts those bytes on
-// disk. On failure the staging file is dropped and nothing is left behind.
+// disk.
+//
+// A failure before the rename drops the staging file and leaves nothing behind
+// at either name. The rename is the point of no return: if the closing
+// directory sync fails after it has landed, the recording stays published at its
+// final name and an error is still returned, because the bytes are readable but
+// their directory entry is not known to have survived a crash.
 func publishFile(f *os.File, tmpPath, finalPath string) error {
 	if err := syncForPublish(f); err != nil {
 		f.Close()

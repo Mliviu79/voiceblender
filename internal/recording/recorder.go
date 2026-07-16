@@ -204,6 +204,10 @@ func (r *Recorder) IsRecording() bool {
 // afterwards if the capture failed mid-write, because a failed capture's bytes
 // are discarded rather than published — leaving nothing at that path. Callers
 // that hand the path on to something else should check this after Wait.
+//
+// False means "do not rely on this path", not "this path is provably empty":
+// a publish that failed only at the closing directory sync leaves the recording
+// present at its final name and still reports false.
 func (r *Recorder) Published() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
