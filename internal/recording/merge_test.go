@@ -3,6 +3,7 @@ package recording
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -41,6 +42,15 @@ func writeMonoWAV(t *testing.T, path string, sampleRate, samples int) {
 func TestMergeMultiChannel_PublishesDurably(t *testing.T) {
 	const sampleRate = 16000
 
+	// The restrictive umask is what gives assertPublishedMode teeth. Both halves
+	// of the staged publish are umask-independent — os.CreateTemp always opens
+	// 0600, and the explicit chmod always restores 0644 — whereas a merge that
+	// created its output directly would get 0666 &^ umask, i.e. 0600 here. So
+	// under this umask only a genuinely staged-and-chmod'd merge can produce the
+	// 0644 the assertion demands; without it, both routes yield 0644 and the
+	// assertion cannot tell them apart.
+	defer syscall.Umask(syscall.Umask(0o077))
+
 	// Inputs live outside the output directory so the residue check there is
 	// unambiguous.
 	srcDir := t.TempDir()
@@ -64,9 +74,16 @@ func TestMergeMultiChannel_PublishesDurably(t *testing.T) {
 	assertNoStagingResidue(t, outDir)
 }
 
-// TestMergeMultiChannel_InvalidInputLeavesNothingBehind proves a merge that
-// fails part-way publishes nothing and leaves no staging file.
-func TestMergeMultiChannel_InvalidInputLeavesNothingBehind(t *testing.T) {
+// TestMergeMultiChannel_InvalidInputCreatesNoOutput covers the input-validation
+// refusal: an unreadable input is rejected before any output file is created, so
+// the output directory is left untouched.
+//
+// Note what this does NOT cover. The merge returns here at the input-validation
+// loop, before staging has begun, so it never reaches the failure cleanup and
+// that cleanup is not what these assertions observe. Exercising it would need an
+// output write to fail, and the merge opens its own output, so there is no
+// injection point for one.
+func TestMergeMultiChannel_InvalidInputCreatesNoOutput(t *testing.T) {
 	srcDir := t.TempDir()
 	outDir := t.TempDir()
 
