@@ -44,9 +44,8 @@ func TestMultiChannelStopAll_SurvivesDiscardedLeg(t *testing.T) {
 
 	// A healthy leg: a finite reader, so the capture ends at EOF and publishes.
 	// Waiting for it here is what makes the test deterministic — stopAll would
-	// otherwise cancel it mid-flight, and a capture cancelled before its first
-	// frame publishes a headerless file the merge rejects for an unrelated
-	// reason.
+	// otherwise cancel it before its first frame, which discards the capture and
+	// omits the leg from the merge, leaving nothing for this test to prove.
 	good := recording.NewRecorder(slog.Default())
 	if _, err := good.StartAt(ctx, bytes.NewReader(make([]byte, 16000)), dir, 8000); err != nil {
 		t.Fatalf("start good leg: %v", err)

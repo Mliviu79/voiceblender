@@ -57,13 +57,13 @@ func (r *Recorder) StartAt(ctx context.Context, reader io.Reader, dir string, sa
 		// blocked on Wait() observe IsRecording()==false the moment they wake.
 		defer close(r.done)
 		defer r.clearRecording()
-		err := r.recordMono(cancel.ctx, reader, staged.f, int(sampleRate))
+		wrote, err := r.recordMono(cancel.ctx, reader, staged.f, int(sampleRate))
 		if err != nil && cancel.ctx.Err() == nil {
 			r.log.Error("recording error", "error", err)
 		}
 		// Publishing runs ahead of the deferred handshake so that Wait callers
 		// find the recording at its final path the moment they wake.
-		r.finish(staged, err)
+		r.finish(staged, wrote, err)
 	}()
 
 	return staged.finalPath, nil
@@ -89,13 +89,13 @@ func (r *Recorder) StartStereo(ctx context.Context, left, right io.Reader, dir s
 		// blocked on Wait() observe IsRecording()==false the moment they wake.
 		defer close(r.done)
 		defer r.clearRecording()
-		err := r.recordStereo(cancel.ctx, left, right, staged.f, int(sampleRate))
+		wrote, err := r.recordStereo(cancel.ctx, left, right, staged.f, int(sampleRate))
 		if err != nil && cancel.ctx.Err() == nil {
 			r.log.Error("stereo recording error", "error", err)
 		}
 		// Publishing runs ahead of the deferred handshake so that Wait callers
 		// find the recording at its final path the moment they wake.
-		r.finish(staged, err)
+		r.finish(staged, wrote, err)
 	}()
 
 	return staged.finalPath, nil
@@ -151,8 +151,17 @@ func (r *Recorder) initRecording(ctx context.Context, dir string) (*stagedFile, 
 // ended: Stop cancels the context, and both capture loops report a cancelled
 // context as a successful end of recording. Treating cancellation as a failure
 // would discard every normally stopped recording.
-func (r *Recorder) finish(staged *stagedFile, recErr error) {
-	if recErr != nil {
+//
+// A capture that never wrote a frame is discarded too, even though it reports
+// no error. The encoder only emits the RIFF header on its first write, so a
+// zero-frame capture's file has no header, is not a readable WAV, and Close
+// reports no error for it — publishing it would report success for a file
+// nothing can open, and hand the merge an input it fails on. wrote tracks
+// enc.Write having been called rather than a sample count, because enc.Write
+// emits the header even for an empty buffer: "enc.Write ran" is exactly the
+// condition that makes the file readable.
+func (r *Recorder) finish(staged *stagedFile, wrote bool, recErr error) {
+	if recErr != nil || !wrote {
 		discardTemp(staged.f, staged.tmpPath)
 		return
 	}
@@ -201,9 +210,11 @@ func (r *Recorder) IsRecording() bool {
 
 // Published reports whether the last recording's bytes actually reached the
 // path Stop returns. It is false while a recording is still running, and false
-// afterwards if the capture failed mid-write, because a failed capture's bytes
-// are discarded rather than published — leaving nothing at that path. Callers
-// that hand the path on to something else should check this after Wait.
+// afterwards if the capture failed mid-write or never captured a frame, because
+// both are discarded rather than published — leaving nothing at that path. A
+// capture that stopped before its first frame is discarded because the file it
+// would publish has no WAV header at all; see finish. Callers that hand the
+// path on to something else should check this after Wait.
 //
 // False means "do not rely on this path", not "this path is provably empty":
 // a publish that failed only at the closing directory sync leaves the recording
@@ -250,7 +261,11 @@ func (r *Recorder) IsPaused() bool {
 // the encoder is what rewrites the WAV size header, so a close failure means the
 // header is still a placeholder; it is reported as a capture error and the
 // caller discards the file rather than publishing an unreadable recording.
-func (r *Recorder) recordMono(ctx context.Context, reader io.Reader, f *os.File, sampleRate int) (err error) {
+//
+// wrote reports whether any frame reached the encoder. A capture that ends
+// before its first write leaves a file with no header at all, which the caller
+// discards for the same reason.
+func (r *Recorder) recordMono(ctx context.Context, reader io.Reader, f *os.File, sampleRate int) (wrote bool, err error) {
 	enc := wav.NewEncoder(f, sampleRate, 16, 1, 1) // mono, PCM format=1
 	// A capture error wins over a close error: it is the earlier and more
 	// specific failure, and both lead to the same discard.
@@ -271,7 +286,7 @@ func (r *Recorder) recordMono(ctx context.Context, reader io.Reader, f *os.File,
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return wrote, nil
 		default:
 		}
 		n, rerr := reader.Read(buf)
@@ -282,11 +297,12 @@ func (r *Recorder) recordMono(ctx context.Context, reader io.Reader, f *os.File,
 			}
 			intBuf.Data = samples
 			if werr := enc.Write(intBuf); werr != nil {
-				return werr
+				return wrote, werr
 			}
+			wrote = true
 		}
 		if rerr != nil {
-			return nil
+			return wrote, nil
 		}
 	}
 }
@@ -330,11 +346,15 @@ type tryReader interface {
 // the encoder is what rewrites the WAV size header, so a close failure means the
 // header is still a placeholder; it is reported as a capture error and the
 // caller discards the file rather than publishing an unreadable recording.
-func (r *Recorder) recordStereo(ctx context.Context, left, right io.Reader, f *os.File, sampleRate int) (err error) {
+//
+// wrote reports whether any slot reached the encoder. A capture that ends
+// before its first write leaves a file with no header at all, which the caller
+// discards for the same reason.
+func (r *Recorder) recordStereo(ctx context.Context, left, right io.Reader, f *os.File, sampleRate int) (wrote bool, err error) {
 	// One slot is one 20 ms tap frame, the cadence both tap writers emit at.
 	slotBytes := sampleRate / 50 * 2
 	if slotBytes <= 0 {
-		return fmt.Errorf("stereo recording: sample rate %d is too low", sampleRate)
+		return false, fmt.Errorf("stereo recording: sample rate %d is too low", sampleRate)
 	}
 	slotSamples := slotBytes / 2
 
@@ -343,7 +363,7 @@ func (r *Recorder) recordStereo(ctx context.Context, left, right io.Reader, f *o
 	// so instead of quietly recording half a conversation.
 	companion, ok := left.(tryReader)
 	if !ok {
-		return fmt.Errorf("stereo recording: companion reader %T cannot be read without blocking", left)
+		return false, fmt.Errorf("stereo recording: companion reader %T cannot be read without blocking", left)
 	}
 
 	enc := wav.NewEncoder(f, sampleRate, 16, 2, 1) // stereo, PCM format=1
@@ -370,13 +390,13 @@ func (r *Recorder) recordStereo(ctx context.Context, left, right io.Reader, f *o
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return wrote, nil
 		default:
 		}
 
 		// The master paces the recording: one full frame in, one slot out.
 		if _, rerr := io.ReadFull(right, masterBuf); rerr != nil {
-			return nil
+			return wrote, nil
 		}
 
 		// Take whatever the companion has ready right now, and no more.
@@ -404,8 +424,9 @@ func (r *Recorder) recordStereo(ctx context.Context, left, right io.Reader, f *o
 		}
 		intBuf.Data = interleaved
 		if werr := enc.Write(intBuf); werr != nil {
-			return werr
+			return wrote, werr
 		}
+		wrote = true
 	}
 }
 

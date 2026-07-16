@@ -28,11 +28,14 @@ func TestRecorder_StartStop(t *testing.T) {
 	dir := t.TempDir()
 	r := NewRecorder(slog.Default())
 
-	// Provide PCM data to read.
-	pcm := generatePCM(8000, 1) // 1 second of silence
-	reader := bytes.NewReader(pcm)
+	// The reader hands over one frame and then never ends, so the capture is
+	// still running when IsRecording is checked, and a frame has provably
+	// reached the encoder before Stop — a capture that wrote nothing is
+	// discarded, so without the handover this would be racing the guard rather
+	// than pinning the happy path.
+	rd := &cancelOnlyReader{first: make(chan struct{})}
 
-	fpath, err := r.Start(context.Background(), reader, dir)
+	fpath, err := r.Start(context.Background(), rd, dir)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -42,6 +45,8 @@ func TestRecorder_StartStop(t *testing.T) {
 	if !r.IsRecording() {
 		t.Error("expected IsRecording=true")
 	}
+
+	<-rd.first
 
 	path := r.Stop()
 	r.Wait()
