@@ -371,6 +371,46 @@ func TestMixer_ParticipantPanicHookFiresExactlyOnce(t *testing.T) {
 	}
 }
 
+// closeSpyWriter accepts every write and records whether it was closed.
+// Stands in for a participant writer whose owner is watching the far end —
+// the WebSocket egress pipe, say, whose reader shuts the client's transport
+// down on EOF.
+type closeSpyWriter struct {
+	closed atomic.Bool
+}
+
+func (w *closeSpyWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+func (w *closeSpyWriter) Close() error {
+	w.closed.Store(true)
+	return nil
+}
+
+// TestMixer_ParticipantPanicClosesWriterToWakeOwner pins the only signal a
+// panicking participant's owner ever receives when that owner is not the room
+// layer. The mixer cannot call a WebSocket or agent session — it is a leaf. It
+// can only close the writer it was handed, so the far end sees EOF and tears
+// itself down. Without this, a ws participant's panic leaves the client
+// connected to a room it can no longer be heard in, forever.
+//
+// Muting p.guard is not enough: it stops writes but is invisible from outside
+// the mixer.
+func TestMixer_ParticipantPanicClosesWriterToWakeOwner(t *testing.T) {
+	m := New(testLog(), DefaultSampleRate)
+	m.Start()
+	defer m.Stop()
+
+	victimWriter := &closeSpyWriter{}
+	m.AddParticipant("victim", &panicAfterReader{limit: 1, frame: make([]byte, m.frameSizeBytes)}, victimWriter)
+
+	waitFor(t, 2*time.Second, "victim removed after read panic", func() bool {
+		return m.ParticipantCount() == 0
+	})
+	waitFor(t, 2*time.Second, "the panicked participant's writer to be closed so its owner wakes", func() bool {
+		return victimWriter.closed.Load()
+	})
+}
+
 // TestMixer_StaleLoopPanicDoesNotEvictSuccessor pins teardown to the
 // participant *instance* rather than to its ID.
 //
