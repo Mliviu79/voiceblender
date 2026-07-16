@@ -295,8 +295,8 @@ func TestResampleWriter_NoSeamDiscontinuity(t *testing.T) {
 // call pays it twice because the room bridge wraps both directions.
 //
 // These bounds bracket resamplerQuality = 4 (measured 4.00 ms per conversion,
-// 8 ms round-trip) tightly enough to fail if the quality moves: quality 3 costs
-// 3.00 ms, quality 6 costs 6.00 ms, quality 8 costs 10.00 ms. Changing
+// 8 ms one-way, 16 ms round-trip) tightly enough to fail if the quality moves:
+// quality 3 costs 3.00 ms, quality 6 costs 6.00 ms, quality 8 costs 10.00 ms. Changing
 // resamplerQuality is meant to fail here and be re-accepted, not to slip
 // through.
 const (
@@ -360,6 +360,127 @@ func TestResample_GroupDelay(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- passband --------------------------------------------------------------
+
+// passbandMinRatio is the floor that chooses resamplerQuality. Stopband
+// attenuation does not pick the constant — the alias is under the int16
+// quantization floor from quality 2 up — passband flatness at the top of the
+// telephony band does, and nothing else in the tree measures it.
+// TestResample_GroupDelay pins the constant by what it COSTS; this pins it by
+// the reason it was chosen, so the deciding quantity fails on its own.
+//
+// Quality 4 retains 0.998 of input at 3.4 kHz, quality 3 only 0.886. The
+// threshold sits between them: this is a floor, so it does not fire upward
+// (quality 6 and 8 measure 0.9999) — the ceiling is the group-delay bracket.
+const passbandMinRatio = 0.95
+
+func TestResample_Passband(t *testing.T) {
+	const (
+		srcRate, dstRate = 16000, 8000
+		toneHz           = 3400.0
+		amp              = 0.9
+		frames           = 50
+	)
+	r := NewPCMResampler(srcRate, dstRate)
+
+	srcFrame := srcRate * 20 / 1000
+	var settled []int16
+	for i := range frames {
+		out := r.ResampleBytes(tonePCM(srcFrame, i*srcFrame, toneHz, srcRate, amp))
+		settled = append(settled, decodePCM(out)...)
+	}
+
+	// Measure past the filter's lead-in, where the response has settled.
+	got := toneAmplitude(settled[len(settled)/2:], toneHz, dstRate) / amp
+	if got < passbandMinRatio {
+		t.Errorf("%g Hz retained %.4f of input, want >= %.2f — the filter is dropping the top of the telephony band",
+			toneHz, got, passbandMinRatio)
+	}
+}
+
+// --- clamp -----------------------------------------------------------------
+
+// The filter's overshoot carries full-scale audio past the int16 range, so
+// every sample leaves the resampler through clampToInt16. Without the clamp the
+// int16 conversion wraps and a peak comes out as loud noise of the opposite
+// sign. TestClampToInt16 pins the function; TestResample_FullScaleDoesNotWrap
+// pins the reachability — every other test here drives 0.8-0.9 amplitudes,
+// which the overshoot cannot push past full scale.
+func TestClampToInt16(t *testing.T) {
+	cases := []struct {
+		name string
+		in   float64
+		want int16
+	}{
+		{"above full scale", 1.5, 32767},
+		{"below full scale", -1.5, -32768},
+		{"positive full scale", 1.0, 32767},
+		{"negative full scale", -1.0, -32768},
+		{"zero", 0, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := clampToInt16(c.in); got != c.want {
+				t.Errorf("clampToInt16(%v) = %d, want %d", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func TestResample_FullScaleDoesNotWrap(t *testing.T) {
+	const (
+		srcRate, dstRate = 8000, 16000
+		numSamples       = 1600
+	)
+	// A full-scale 1 kHz square: 8 samples per cycle at 8 kHz. Its edges are
+	// what drive the filter's overshoot past full scale.
+	in := make([]int16, numSamples)
+	for i := range in {
+		if (i/4)%2 == 0 {
+			in[i] = 32767
+		} else {
+			in[i] = -32768
+		}
+	}
+
+	out := newPCMResampler(srcRate, dstRate, resamplerQuality).ResampleSamples(in)
+
+	// A wrap turns each overshooting peak into a sample of the opposite sign,
+	// so the crossings explode (measured 422 clamped versus 1984 unclamped
+	// against 399 in the input). The filter's ringing on a square legitimately
+	// adds crossings of its own, so the bound is a plain 2x of the input.
+	gotSC, wantSC := signChanges(out), 2*signChanges(in)
+	if gotSC > wantSC {
+		t.Errorf("output has %d sign changes, want <= %d (input has %d) — full-scale overshoot is wrapping into the opposite sign instead of clamping",
+			gotSC, wantSC, signChanges(in))
+	}
+
+	// Fixture sanity, checked second so a wrap reports as a wrap: clamped
+	// output rails ~800 of 3200 samples. If this trips on its own, the square
+	// stopped driving the filter into overshoot and the check above is vacuous.
+	railed := 0
+	for _, s := range out {
+		if s == 32767 || s == -32768 {
+			railed++
+		}
+	}
+	if railed < 100 {
+		t.Errorf("only %d of %d output samples reached full scale — the fixture is no longer driving the filter into overshoot, so the sign-change check above proves nothing",
+			railed, len(out))
+	}
+}
+
+// signChanges counts adjacent samples that flip sign.
+func signChanges(x []int16) int {
+	n := 0
+	for i := 1; i < len(x); i++ {
+		if (x[i-1] < 0) != (x[i] < 0) {
+			n++
+		}
+	}
+	return n
 }
 
 // --- benchmark -------------------------------------------------------------
