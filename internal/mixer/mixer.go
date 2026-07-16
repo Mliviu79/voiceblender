@@ -571,9 +571,14 @@ const tickPanicLogInterval = 5 * time.Second
 //
 // Logging is rate-limited because a deterministically panicking frame recurs
 // every tick: at Ptime cadence that is ~50 multi-KB stack traces a second,
-// forever. The first panic carries the full stack — that is the one worth
-// diagnosing — and subsequent ones collapse into at most one stackless line
-// per tickPanicLogInterval carrying the running total.
+// forever. Only the first tick panic of this Mixer's whole lifetime carries a
+// stack; every later one collapses into at most one stackless line per
+// tickPanicLogInterval, carrying the panic value and the running total.
+//
+// The counter is never re-armed, and a Mixer lives as long as its room — hours.
+// So a second, unrelated tick panic long after the first is permanently
+// stackless and still labelled "(repeating)". That is degraded diagnosability,
+// not lost: the panic value still reaches the log every interval.
 func (m *Mixer) recoverTick() {
 	r := recover()
 	if r == nil {
