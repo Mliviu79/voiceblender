@@ -1,10 +1,13 @@
 package metrics
 
 import (
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/VoiceBlender/voiceblender/internal/events"
 )
@@ -166,6 +169,59 @@ func TestCollector_ImplementsObserver(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("expected %q in /metrics body:\n%s", want, body)
 		}
+	}
+}
+
+// TestCollector_ObservesRealWebhookRegistry joins the two halves of the feature
+// that every other test leaves apart: TestWebhookRegistry_* prove webhook.go
+// calls *an interface* (they pass a fake observer), and
+// TestCollector_ImplementsObserver proves each method reaches its counter (it
+// calls the methods directly). Neither binds a real *Collector to a real
+// WebhookRegistry, so a Collector that satisfies the interface but never gets
+// attached would satisfy both. This drives a real event through a real registry
+// into a real counter and reads the value back off /metrics.
+//
+// Scope, honestly: this closes the composition gap, not the main() gap. It does
+// not make the SetMetricsObserver call in cmd/voiceblender deletable-and-red —
+// no main() wiring in this repo is test-covered.
+func TestCollector_ObservesRealWebhookRegistry(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	bus := events.NewBus("test")
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// The global-webhook argument is what routes the event, so no SetLegWebhook.
+	reg := events.NewWebhookRegistry(bus, log, srv.URL, "")
+	defer reg.Stop()
+
+	c := New(bus)
+	reg.SetMetricsObserver(c)
+
+	bus.Publish(events.LegRinging, &events.LegRingingData{
+		LegScope: events.LegScope{LegID: "leg-1"},
+	})
+
+	// enqueue runs inline on the publisher's goroutine, so enqueued is already
+	// counted here; only the delivery leg is handed to a worker goroutine.
+	body := getMetrics(t, c)
+	if !strings.Contains(body, "voiceblender_webhook_enqueued_total 1") {
+		t.Errorf("enqueued counter did not move, body:\n%s", body)
+	}
+
+	const wantDelivered = `voiceblender_webhook_deliveries_total{outcome="success"} 1`
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		body = getMetrics(t, c)
+		if strings.Contains(body, wantDelivered) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("deliveries counter did not move: want %q, body:\n%s", wantDelivered, body)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
