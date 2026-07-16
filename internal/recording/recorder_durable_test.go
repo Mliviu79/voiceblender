@@ -280,10 +280,13 @@ func (eofReader) Read(p []byte) (int, error) { return 0, io.EOF }
 // itself cannot see. go-audio's Encoder.Close is the sole writer of the real
 // RIFF/data sizes, so if it fails the file keeps its placeholder header and is
 // not a playable WAV — yet every write the loop made succeeded. Closing the fd
-// out from under the encoder reproduces exactly that: the reader ends at once so
-// enc.Write never runs, and Close's header rewrite is the only thing that fails.
-// Unless that error is surfaced, finish() publishes an unreadable recording and
-// reports Published()==true for it.
+// out from under the encoder reproduces exactly that.
+//
+// What this pins is that a Close failure is surfaced as a capture error at all,
+// which is what matters for a capture that wrote frames and then failed its
+// header rewrite: nothing else would catch it. This case reaches the same
+// discard by a second route — the reader ends at once, so enc.Write never runs
+// and the zero-frame guard in finish() would discard the file regardless.
 func TestRecorder_CloseErrorIsCaptureFailure(t *testing.T) {
 	f, err := os.Create(filepath.Join(t.TempDir(), "closed.wav"))
 	if err != nil {
@@ -295,7 +298,7 @@ func TestRecorder_CloseErrorIsCaptureFailure(t *testing.T) {
 	}
 
 	r := NewRecorder(slog.Default())
-	if err := r.recordMono(context.Background(), eofReader{}, f, 8000); err == nil {
+	if _, err := r.recordMono(context.Background(), eofReader{}, f, 8000); err == nil {
 		t.Fatal("recordMono reported success though the WAV size header could not be rewritten")
 	}
 }
@@ -355,4 +358,90 @@ func TestRecorder_NormalStopPublishes(t *testing.T) {
 	}
 	assertPlayable(t, fpath, 1)
 	assertNoStagingResidue(t, dir)
+}
+
+// assertDiscarded fails unless a capture left nothing behind: nothing at its
+// published name, no staging residue, and Published() reporting false. That is
+// the whole contract a zero-frame capture must meet, so a future change that
+// publishes an unreadable file or leaks a staging file is caught here.
+func assertDiscarded(t *testing.T, r *Recorder, dir, fpath string) {
+	t.Helper()
+	if r.Published() {
+		t.Errorf("Published() is true after a capture that wrote no frames — %s is not a readable WAV", fpath)
+	}
+	if _, err := os.Stat(fpath); !os.IsNotExist(err) {
+		t.Errorf("%s exists after a zero-frame capture, os.Stat err = %v", fpath, err)
+	}
+	assertNoStagingResidue(t, dir)
+}
+
+// TestRecorder_ZeroFrameCaptureIsNotPublished pins the mono zero-frame guard.
+// The encoder writes the RIFF header on its first write, so a capture whose
+// reader ends before a single frame arrives leaves a headerless file that no
+// decoder can open — and Close reports no error for it, so the capture looks
+// successful. Publishing it would report success for a file nothing can read
+// and hand the multi-channel merge an input it fails on, taking every other
+// participant's audio down with it.
+func TestRecorder_ZeroFrameCaptureIsNotPublished(t *testing.T) {
+	dir := t.TempDir()
+	r := NewRecorder(slog.Default())
+
+	fpath, err := r.StartAt(context.Background(), eofReader{}, dir, 8000)
+	if err != nil {
+		t.Fatalf("StartAt: %v", err)
+	}
+	r.Wait()
+
+	assertDiscarded(t, r, dir, fpath)
+}
+
+// TestRecorder_StopBeforeFirstFrameIsNotPublished covers the reachable shape:
+// the capture is stopped before it ever reads. A participant who joins and
+// leaves inside one 20 ms mix tick gets exactly this, because the loop checks
+// its context before its first read.
+//
+// The frame is queued in the pipe before the capture starts, so this also pins
+// what the discard decision rests on: audio that was genuinely ready is dropped
+// on this path. That is why a zero-frame leg is omitted and named rather than
+// given a silent channel — a silent channel would assert this participant said
+// nothing, when in fact their audio was discarded.
+func TestRecorder_StopBeforeFirstFrameIsNotPublished(t *testing.T) {
+	dir := t.TempDir()
+	r := NewRecorder(slog.Default())
+
+	// One full frame of audible audio, queued and ready before the capture runs.
+	pr, pw := newSyncPipe()
+	if _, err := pw.Write(bytes.Repeat([]byte{0x11}, 640)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	// Already cancelled: the loop's ctx check precedes its first read, so the
+	// queued frame is never read and no frame reaches the encoder.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	fpath, err := r.StartAt(ctx, pr, dir, 8000)
+	if err != nil {
+		t.Fatalf("StartAt: %v", err)
+	}
+	r.Wait()
+
+	assertDiscarded(t, r, dir, fpath)
+}
+
+// TestRecorder_ZeroFrameStereoCaptureIsNotPublished pins the same guard on the
+// stereo loop, which has its own encoder and its own early returns. The master
+// clock EOFs before clocking a single slot, so no slot is ever written.
+func TestRecorder_ZeroFrameStereoCaptureIsNotPublished(t *testing.T) {
+	dir := t.TempDir()
+	r := NewRecorder(slog.Default())
+
+	leftPR, _ := newSyncPipe()
+	fpath, err := r.StartStereo(context.Background(), leftPR, bytes.NewReader(nil), dir, 8000)
+	if err != nil {
+		t.Fatalf("StartStereo: %v", err)
+	}
+	r.Wait()
+
+	assertDiscarded(t, r, dir, fpath)
 }
