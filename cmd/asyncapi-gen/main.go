@@ -450,7 +450,7 @@ func eventMessage(ev api.EventMeta) *omap {
 
 func lifecycleMessage(lf api.VSILifecycleFrame) *omap {
 	switch lf.Name {
-	case "connected", "ping":
+	case "connected":
 		return newMap().
 			set("name", lifecycleMsgName(lf.Name)).
 			set("title", lf.Description).
@@ -459,6 +459,16 @@ func lifecycleMessage(lf api.VSILifecycleFrame) *omap {
 				set("properties", newMap().
 					set("type", newMap().set("const", lf.Name))).
 				set("required", newSeq().add("type")))
+	case "ping":
+		return newMap().
+			set("name", lifecycleMsgName(lf.Name)).
+			set("title", lf.Description).
+			set("payload", newMap().
+				set("type", "object").
+				set("properties", newMap().
+					set("type", newMap().set("const", "ping")).
+					set("seq", newMap().set("type", "integer").set("description", "Per-connection monotonic counter starting at 1; resets on reconnect."))).
+				set("required", newSeq().add("type").add("seq")))
 	case "events_dropped":
 		return newMap().
 			set("name", lifecycleMsgName(lf.Name)).

@@ -4929,8 +4929,12 @@ components:
                 properties:
                     type:
                         const: ping
+                    seq:
+                        type: integer
+                        description: Per-connection monotonic counter starting at 1; resets on reconnect.
                 required:
                     - type
+                    - seq
         frame_pong:
             name: frame_pong
             title: Optional client keepalive reply to a `ping`. Currently a no-op on the server side.
