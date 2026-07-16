@@ -233,6 +233,18 @@ func TestWebhookRegistry_DeliverMarshalError(t *testing.T) {
 	if got := obs.waitDelivered(t); got != "marshal_error" {
 		t.Errorf("outcome = %q, want marshal_error", got)
 	}
+
+	// Pin deliver's documented exactly-one-outcome invariant, not just the
+	// first outcome: without a return after outcome("marshal_error"), execution
+	// falls into the retry loop and also reports "exhausted", which
+	// waitDelivered alone cannot see. deliver runs synchronously here
+	// (newTestRegistry starts no workers), so every increment has landed.
+	obs.mu.Lock()
+	n := len(obs.delivered)
+	obs.mu.Unlock()
+	if n != 1 {
+		t.Errorf("delivered calls = %d, want exactly 1", n)
+	}
 }
 
 // unmarshalableData is EventData whose JSON encoding always fails, driving
