@@ -242,12 +242,19 @@ func (r *Recorder) IsPaused() bool {
 // recordMono writes raw PCM data as a mono WAV file using go-audio/wav.
 // While paused, incoming samples are replaced with silence so the written
 // WAV preserves real-time duration.
-// The file is left open on return: the caller publishes or discards it, and the
-// deferred enc.Close must have rewritten the WAV size header before that
-// happens.
-func (r *Recorder) recordMono(ctx context.Context, reader io.Reader, f *os.File, sampleRate int) error {
+// The file is left open on return: the caller publishes or discards it. Closing
+// the encoder is what rewrites the WAV size header, so a close failure means the
+// header is still a placeholder; it is reported as a capture error and the
+// caller discards the file rather than publishing an unreadable recording.
+func (r *Recorder) recordMono(ctx context.Context, reader io.Reader, f *os.File, sampleRate int) (err error) {
 	enc := wav.NewEncoder(f, sampleRate, 16, 1, 1) // mono, PCM format=1
-	defer enc.Close()
+	// A capture error wins over a close error: it is the earlier and more
+	// specific failure, and both lead to the same discard.
+	defer func() {
+		if cerr := enc.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("close recording: %w", cerr)
+		}
+	}()
 
 	buf := make([]byte, 640)
 	intBuf := &audio.IntBuffer{
@@ -263,7 +270,7 @@ func (r *Recorder) recordMono(ctx context.Context, reader io.Reader, f *os.File,
 			return nil
 		default:
 		}
-		n, err := reader.Read(buf)
+		n, rerr := reader.Read(buf)
 		if n > 0 {
 			samples := bytesToInt(buf[:n])
 			if r.paused.Load() {
@@ -274,7 +281,7 @@ func (r *Recorder) recordMono(ctx context.Context, reader io.Reader, f *os.File,
 				return werr
 			}
 		}
-		if err != nil {
+		if rerr != nil {
 			return nil
 		}
 	}
@@ -315,10 +322,11 @@ type tryReader interface {
 //
 // While paused, interleaved samples are zeroed on both channels.
 //
-// The file is left open on return: the caller publishes or discards it, and the
-// deferred enc.Close must have rewritten the WAV size header before that
-// happens.
-func (r *Recorder) recordStereo(ctx context.Context, left, right io.Reader, f *os.File, sampleRate int) error {
+// The file is left open on return: the caller publishes or discards it. Closing
+// the encoder is what rewrites the WAV size header, so a close failure means the
+// header is still a placeholder; it is reported as a capture error and the
+// caller discards the file rather than publishing an unreadable recording.
+func (r *Recorder) recordStereo(ctx context.Context, left, right io.Reader, f *os.File, sampleRate int) (err error) {
 	// One slot is one 20 ms tap frame, the cadence both tap writers emit at.
 	slotBytes := sampleRate / 50 * 2
 	if slotBytes <= 0 {
@@ -335,7 +343,13 @@ func (r *Recorder) recordStereo(ctx context.Context, left, right io.Reader, f *o
 	}
 
 	enc := wav.NewEncoder(f, sampleRate, 16, 2, 1) // stereo, PCM format=1
-	defer enc.Close()
+	// A capture error wins over a close error: it is the earlier and more
+	// specific failure, and both lead to the same discard.
+	defer func() {
+		if cerr := enc.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("close recording: %w", cerr)
+		}
+	}()
 
 	masterBuf := make([]byte, slotBytes)
 	drainBuf := make([]byte, slotBytes)
