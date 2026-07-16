@@ -2,9 +2,11 @@ package room
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -344,5 +346,209 @@ func TestManager_DeletePanickingLegDoesNotCrash(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected room.deleted event after a panicking leg hangup")
+	}
+}
+
+// TestManager_CreateDoesNotHoldLockWhilePublishing pins the fix for a live
+// self-deadlock, not a style point. Bus.Publish runs handlers synchronously on
+// the caller's goroutine and sync.RWMutex is not reentrant, so publishing
+// room.created under m.mu wedges any subscriber that calls back into the
+// manager. It also asserts the room is discoverable by the time the event
+// announces it, which is the ordering the old locked publish gave for free.
+func TestManager_CreateDoesNotHoldLockWhilePublishing(t *testing.T) {
+	bus := newTestBus()
+	mgr := NewManager(leg.NewManager(), bus, newTestLog())
+
+	var probeReturned, found atomic.Bool
+	bus.Subscribe(func(e events.Event) {
+		if e.Type != events.RoomCreated {
+			return
+		}
+		// Probe from another goroutine and block this one until it answers.
+		// Calling Get inline would deadlock Create's own goroutine forever
+		// instead of failing; and returning without waiting would release
+		// m.mu before the probe ran, so the probe must finish inside the
+		// publish window to prove anything.
+		probeDone := make(chan struct{})
+		go func() {
+			defer close(probeDone)
+			_, ok := mgr.Get("r1")
+			found.Store(ok)
+		}()
+		select {
+		case <-probeDone:
+			probeReturned.Store(true)
+		case <-time.After(2 * time.Second):
+		}
+	})
+
+	if _, err := mgr.Create("r1", "", 0); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if !probeReturned.Load() {
+		t.Fatal("room.created published while m.mu was held: subscriber's Get() blocked")
+	}
+	if !found.Load() {
+		t.Fatal("room.created published before the room was discoverable")
+	}
+}
+
+// TestManager_MoveLegDoesNotHoldLockWhilePublishing is the Create test's twin
+// for MoveLeg's fallback room creation. That branch is only reachable when the
+// target room is absent — the sole API caller creates it first, so in
+// production it takes a delete race — but the violation is identical and the
+// unit API reaches it directly.
+func TestManager_MoveLegDoesNotHoldLockWhilePublishing(t *testing.T) {
+	bus := newTestBus()
+	legMgr := leg.NewManager()
+	mgr := NewManager(legMgr, bus, newTestLog())
+	if _, err := mgr.Create("from", "", 0); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	mover := newMockLeg("mover")
+	legMgr.Add(mover)
+	if err := mgr.AddLeg("from", "mover"); err != nil {
+		t.Fatalf("AddLeg: %v", err)
+	}
+
+	// Subscribed after the source room exists, so the only room.created seen
+	// here is the one MoveLeg publishes for the target.
+	var probeReturned, found atomic.Bool
+	bus.Subscribe(func(e events.Event) {
+		if e.Type != events.RoomCreated {
+			return
+		}
+		probeDone := make(chan struct{})
+		go func() {
+			defer close(probeDone)
+			_, ok := mgr.Get("to")
+			found.Store(ok)
+		}()
+		select {
+		case <-probeDone:
+			probeReturned.Store(true)
+		case <-time.After(2 * time.Second):
+		}
+	})
+
+	if err := mgr.MoveLeg("from", "to", "mover"); err != nil {
+		t.Fatalf("MoveLeg: %v", err)
+	}
+
+	if !probeReturned.Load() {
+		t.Fatal("MoveLeg published room.created while m.mu was held: subscriber's Get() blocked")
+	}
+	if !found.Load() {
+		t.Fatal("MoveLeg published room.created before the target room was discoverable")
+	}
+}
+
+// TestManager_MoveLegConcurrentCreatePublishesOnce pins the double-check that
+// replaced the single locked !ok branch. room.created is a public webhook, so
+// concurrent moves into the same absent room must announce it exactly once —
+// the guarantee the old lock-around-everything gave, which the fix has to keep
+// by other means.
+func TestManager_MoveLegConcurrentCreatePublishesOnce(t *testing.T) {
+	bus := newTestBus()
+	legMgr := leg.NewManager()
+	mgr := NewManager(legMgr, bus, newTestLog())
+
+	const movers = 8
+	for i := 0; i < movers; i++ {
+		src := fmt.Sprintf("from-%d", i)
+		if _, err := mgr.Create(src, "", 0); err != nil {
+			t.Fatalf("Create %s: %v", src, err)
+		}
+		l := newMockLeg(fmt.Sprintf("leg-%d", i))
+		legMgr.Add(l)
+		if err := mgr.AddLeg(src, l.ID()); err != nil {
+			t.Fatalf("AddLeg: %v", err)
+		}
+	}
+
+	var mu sync.Mutex
+	targetCreated := 0
+	bus.Subscribe(func(e events.Event) {
+		d, ok := e.Data.(*events.RoomCreatedData)
+		if !ok || e.Type != events.RoomCreated || d.RoomID != "to" {
+			return
+		}
+		mu.Lock()
+		targetCreated++
+		mu.Unlock()
+	})
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < movers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			if err := mgr.MoveLeg(fmt.Sprintf("from-%d", i), "to", fmt.Sprintf("leg-%d", i)); err != nil {
+				t.Errorf("MoveLeg: %v", err)
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if targetCreated != 1 {
+		t.Fatalf("room.created for target published %d times, want exactly 1", targetCreated)
+	}
+}
+
+// TestManager_PanickedLegNotifiesOwner drives the real path — a leg whose
+// AudioReader panics, through the real mixer readLoop, the real
+// SetOnParticipantPanic hook, into tearDownPanickedLeg — and asserts the owner
+// is told. Without the notification the room layer hangs the leg up and the
+// API layer never learns, so no CDR is published and the leg leaks in the leg
+// manager.
+func TestManager_PanickedLegNotifiesOwner(t *testing.T) {
+	legMgr := leg.NewManager()
+	mgr := NewManager(legMgr, newTestBus(), newTestLog())
+
+	type notice struct {
+		leg    leg.Leg
+		reason string
+	}
+	var mu sync.Mutex
+	var notices []notice
+	mgr.SetOnLegPanicTeardown(func(l leg.Leg, reason string) {
+		mu.Lock()
+		notices = append(notices, notice{leg: l, reason: reason})
+		mu.Unlock()
+	})
+
+	if _, err := mgr.Create("r1", "", 0); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	l := addPanickingLeg(t, mgr, legMgr, "r1", "leg-1")
+
+	waitFor(t, 2*time.Second, "owner notified of the panicked leg", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(notices) > 0
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(notices) != 1 {
+		t.Fatalf("owner notified %d times, want exactly 1", len(notices))
+	}
+	if notices[0].leg.ID() != "leg-1" {
+		t.Fatalf("owner notified for leg %q, want %q", notices[0].leg.ID(), "leg-1")
+	}
+	if notices[0].reason != "mixer_panic" {
+		t.Fatalf("reason = %q, want %q", notices[0].reason, "mixer_panic")
+	}
+	// The owner's callback runs cleanupLeg, which hangs the leg up; the room
+	// must have done that already rather than leaving it to a hook that may
+	// not be installed.
+	if !l.hungUp.Load() {
+		t.Fatal("owner notified before the panicked leg was hung up")
 	}
 }
