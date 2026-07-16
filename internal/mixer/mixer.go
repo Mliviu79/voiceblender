@@ -478,6 +478,17 @@ func (m *Mixer) removeParticipantIf(p *Participant) bool {
 func (m *Mixer) teardownParticipant(p *Participant) {
 	if p.guard != nil {
 		p.guard.Close() // prevent any further writes to the network
+		// Muting the guard stops writes but tells the owner nothing: an owner
+		// parked on the read end of the writer it handed us would wait for
+		// audio that is never coming again. If that writer is an io.Closer,
+		// close it so the owner observes EOF and runs its own teardown. This
+		// is the only notification a participant whose owner is not the room
+		// layer (a WebSocket client, say) ever gets — the mixer is a leaf and
+		// cannot call them. Owner-initiated removals have already closed it;
+		// every writer reaching here is idempotent on Close.
+		if wc, ok := p.guard.w.(io.Closer); ok {
+			_ = wc.Close()
+		}
 	}
 	// Closing p.done alone does not unblock readLoop when it is parked
 	// inside p.Reader.Read (the select runs only between iterations).
