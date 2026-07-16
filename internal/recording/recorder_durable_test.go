@@ -1,12 +1,14 @@
 package recording
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/go-audio/wav"
 )
@@ -298,29 +300,54 @@ func TestRecorder_CloseErrorIsCaptureFailure(t *testing.T) {
 	}
 }
 
+// cancelOnlyReader hands over exactly one frame and then never ends: every
+// later read returns (0, nil), never data, never an error, never EOF. Nothing
+// about it is cancellable, so the capture loop just keeps cycling and the
+// context cancel is the only exit that exists — which is what makes it a
+// faithful probe of the cancel path. The sleep paces the loop instead of
+// spinning hot; it costs no determinism, because the first iteration after Stop
+// hits the ctx.Done select regardless.
+//
+// It is only ever read by the recording goroutine.
+type cancelOnlyReader struct {
+	first chan struct{}
+	sent  bool
+}
+
+func (c *cancelOnlyReader) Read(p []byte) (int, error) {
+	if !c.sent {
+		c.sent = true
+		n := copy(p, bytes.Repeat([]byte{0x11}, 640))
+		close(c.first)
+		return n, nil
+	}
+	time.Sleep(time.Millisecond)
+	return 0, nil
+}
+
 // TestRecorder_NormalStopPublishes pins the finalize trigger: Stop cancels the
 // recording's context, and a cancelled context is the normal end of a
 // recording, not a failure. Treating it as one would discard every recording
 // that was stopped the ordinary way.
+//
+// The reader deliberately never ends on its own. An input that ends by itself —
+// a closed pipe or a drained buffer — lets the capture loop exit through its EOF
+// path, which publishes too, so the test would pass without the cancel path ever
+// working. Here the cancel is the only way out.
 func TestRecorder_NormalStopPublishes(t *testing.T) {
 	dir := t.TempDir()
 	r := NewRecorder(slog.Default())
 
-	pr, pw := newSyncPipe()
-	gate := &frameGate{r: pr, secondRead: make(chan struct{})}
-
-	fpath, err := r.StartAt(context.Background(), gate, dir, 8000)
+	rd := &cancelOnlyReader{first: make(chan struct{})}
+	fpath, err := r.StartAt(context.Background(), rd, dir, 8000)
 	if err != nil {
 		t.Fatalf("StartAt: %v", err)
 	}
-	if _, err := pw.Write(make([]byte, 640)); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	<-gate.secondRead
 
-	// Stop without ever closing the reader: the context cancel alone ends it.
+	// One frame is provably in before the recording is stopped.
+	<-rd.first
+
 	r.Stop()
-	pw.Close()
 	r.Wait()
 
 	if !r.Published() {
