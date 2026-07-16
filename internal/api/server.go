@@ -106,6 +106,22 @@ func NewServer(
 		pendingRefers:  newPendingReferStore(),
 		regAttempts:    newRegisterAttemptStore(),
 	}
+	// A leg whose mixer IO loop panicked is torn down inside the room layer,
+	// which cannot finish the job: the CDR, the OTel span, the per-leg webhook
+	// and the leg-manager entry are all API-layer state, and room cannot import
+	// api. Without this the leg emits leg.left_room and nothing else — no
+	// leg.disconnected, an unended span, and it stays in LegMgr, so
+	// GET /v1/legs/{id} keeps serving a dead leg forever.
+	//
+	// This is the leg-scoped half only. tearDownPanickedLeg's RemoveLeg has
+	// already cleared the leg's RoomID by the time this runs, so cleanupLeg's
+	// room block is skipped — which is what stops a second leg.left_room, and
+	// which also means the room-scoped cleanup does not run here.
+	roomMgr.SetOnLegPanicTeardown(func(l leg.Leg, reason string) {
+		s.cleanupLeg(l)
+		s.publishDisconnect(l, reason)
+	})
+
 	s.routes()
 	return s
 }

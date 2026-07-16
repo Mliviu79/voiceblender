@@ -449,55 +449,85 @@ func TestManager_MoveLegDoesNotHoldLockWhilePublishing(t *testing.T) {
 // concurrent moves into the same absent room must announce it exactly once —
 // the guarantee the old lock-around-everything gave, which the fix has to keep
 // by other means.
+//
+// The get-or-create window this races on is only a few hundred nanoseconds
+// wide (NewRoom plus the Lock), so one round catches a regression maybe one
+// time in five on a loaded machine. Rounds are repeated to make the guard
+// dependable rather than decorative: an unguarded insert is caught on every
+// observed run.
 func TestManager_MoveLegConcurrentCreatePublishesOnce(t *testing.T) {
+	const (
+		rounds = 150
+		movers = 4
+	)
+
 	bus := newTestBus()
 	legMgr := leg.NewManager()
 	mgr := NewManager(legMgr, bus, newTestLog())
 
-	const movers = 8
-	for i := 0; i < movers; i++ {
-		src := fmt.Sprintf("from-%d", i)
-		if _, err := mgr.Create(src, "", 0); err != nil {
-			t.Fatalf("Create %s: %v", src, err)
-		}
-		l := newMockLeg(fmt.Sprintf("leg-%d", i))
-		legMgr.Add(l)
-		if err := mgr.AddLeg(src, l.ID()); err != nil {
-			t.Fatalf("AddLeg: %v", err)
+	srcRoom := func(r, i int) string { return fmt.Sprintf("from-%d-%d", r, i) }
+	legID := func(r, i int) string { return fmt.Sprintf("leg-%d-%d", r, i) }
+	target := func(r int) string { return fmt.Sprintf("to-%d", r) }
+
+	for r := 0; r < rounds; r++ {
+		for i := 0; i < movers; i++ {
+			if _, err := mgr.Create(srcRoom(r, i), "", 0); err != nil {
+				t.Fatalf("Create %s: %v", srcRoom(r, i), err)
+			}
+			l := newMockLeg(legID(r, i))
+			legMgr.Add(l)
+			if err := mgr.AddLeg(srcRoom(r, i), l.ID()); err != nil {
+				t.Fatalf("AddLeg: %v", err)
+			}
 		}
 	}
 
+	// Subscribed after the fixture, so only the targets' room.created is seen.
 	var mu sync.Mutex
-	targetCreated := 0
+	created := map[string]int{}
 	bus.Subscribe(func(e events.Event) {
 		d, ok := e.Data.(*events.RoomCreatedData)
-		if !ok || e.Type != events.RoomCreated || d.RoomID != "to" {
+		if !ok || e.Type != events.RoomCreated {
 			return
 		}
 		mu.Lock()
-		targetCreated++
+		created[d.RoomID]++
 		mu.Unlock()
 	})
 
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	for i := 0; i < movers; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			<-start
-			if err := mgr.MoveLeg(fmt.Sprintf("from-%d", i), "to", fmt.Sprintf("leg-%d", i)); err != nil {
-				t.Errorf("MoveLeg: %v", err)
-			}
-		}(i)
+	for r := 0; r < rounds; r++ {
+		// Spin barrier, not a channel close: waking N goroutines off a closed
+		// channel lets the runtime release them one at a time, and the first
+		// can finish its whole move before the last wakes, so the window never
+		// overlaps. Spinning keeps every mover hot on its own P.
+		var ready sync.WaitGroup
+		var gate atomic.Bool
+		var wg sync.WaitGroup
+		ready.Add(movers)
+		for i := 0; i < movers; i++ {
+			wg.Add(1)
+			go func(r, i int) {
+				defer wg.Done()
+				ready.Done()
+				for !gate.Load() {
+					runtime.Gosched()
+				}
+				if err := mgr.MoveLeg(srcRoom(r, i), target(r), legID(r, i)); err != nil {
+					t.Errorf("MoveLeg: %v", err)
+				}
+			}(r, i)
+		}
+		ready.Wait()
+		gate.Store(true)
+		wg.Wait()
 	}
-	close(start)
-	wg.Wait()
 
 	mu.Lock()
 	defer mu.Unlock()
-	if targetCreated != 1 {
-		t.Fatalf("room.created for target published %d times, want exactly 1", targetCreated)
+	for r := 0; r < rounds; r++ {
+		if n := created[target(r)]; n != 1 {
+			t.Fatalf("room.created for %s published %d times, want exactly 1", target(r), n)
+		}
 	}
 }
 
