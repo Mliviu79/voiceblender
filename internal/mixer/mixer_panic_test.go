@@ -136,12 +136,25 @@ func TestMixer_ReadLoopPanicRemovesParticipant(t *testing.T) {
 // TestMixer_WriteLoopPanicRemovesParticipant verifies that a panic inside a
 // participant's Writer.Write is recovered, removes exactly that
 // participant, and the mixer keeps ticking for the rest.
+//
+// It also pins the label writeLoop hands the hook. loop is the only field
+// telling an operator an RTP send failed rather than inbound media, and it is
+// asserted nowhere else against the real loop: the hook's other label test
+// supplies the string itself while direct-driving recoverParticipant, so it
+// cannot catch a mislabelled production call site.
 func TestMixer_WriteLoopPanicRemovesParticipant(t *testing.T) {
 	m := New(testLog(), DefaultSampleRate)
 	m.Start()
 	defer m.Stop()
 
 	fsz := m.frameSizeBytes
+
+	gotLoop := make(chan string, 4)
+	m.SetOnParticipantPanic(func(id, loop string) {
+		if id == "victim" {
+			gotLoop <- loop
+		}
+	})
 
 	victimReader := &silenceReader{frame: make([]byte, fsz)}
 	victimWriter := &panicAfterWriter{limit: 2}
@@ -172,6 +185,15 @@ func TestMixer_WriteLoopPanicRemovesParticipant(t *testing.T) {
 	waitFor(t, 2*time.Second, "victim removed after write panic", func() bool {
 		return m.ParticipantCount() == 1
 	})
+
+	select {
+	case loop := <-gotLoop:
+		if loop != "writeLoop" {
+			t.Errorf("hook loop = %q, want writeLoop — an RTP send failure must not be reported as inbound media", loop)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the write panic to reach the hook")
+	}
 
 	before := len(survivorCapture.Bytes())
 	time.Sleep(200 * time.Millisecond)
