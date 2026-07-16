@@ -2,6 +2,7 @@ package recording
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -265,6 +266,36 @@ func TestRecorder_CaptureError_DiscardsStagedFile(t *testing.T) {
 		t.Error("Published() is true after a capture that failed and was discarded")
 	}
 	assertNoStagingResidue(t, dir)
+}
+
+// eofReader yields no data and ends immediately, so a capture loop reading it
+// writes nothing and sees no error of its own.
+type eofReader struct{}
+
+func (eofReader) Read(p []byte) (int, error) { return 0, io.EOF }
+
+// TestRecorder_CloseErrorIsCaptureFailure pins the one capture failure the loop
+// itself cannot see. go-audio's Encoder.Close is the sole writer of the real
+// RIFF/data sizes, so if it fails the file keeps its placeholder header and is
+// not a playable WAV — yet every write the loop made succeeded. Closing the fd
+// out from under the encoder reproduces exactly that: the reader ends at once so
+// enc.Write never runs, and Close's header rewrite is the only thing that fails.
+// Unless that error is surfaced, finish() publishes an unreadable recording and
+// reports Published()==true for it.
+func TestRecorder_CloseErrorIsCaptureFailure(t *testing.T) {
+	f, err := os.Create(filepath.Join(t.TempDir(), "closed.wav"))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Close the fd so the encoder's trailing header rewrite cannot land.
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	r := NewRecorder(slog.Default())
+	if err := r.recordMono(context.Background(), eofReader{}, f, 8000); err == nil {
+		t.Fatal("recordMono reported success though the WAV size header could not be rewritten")
+	}
 }
 
 // TestRecorder_NormalStopPublishes pins the finalize trigger: Stop cancels the
