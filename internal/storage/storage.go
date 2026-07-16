@@ -33,9 +33,11 @@ const bucketPreflightTimeout = 10 * time.Second
 
 // endpointIsInsecure reports whether the endpoint explicitly requests
 // plaintext HTTP. Only an explicit "http://" scheme is classified as
-// insecure: an empty endpoint means the SDK default (AWS, always TLS), and a
-// scheme-less endpoint such as "minio.internal:9000" cannot be classified, so
-// both fail open and are accepted.
+// insecure: an empty endpoint means the SDK default (AWS, always TLS) and is
+// accepted. A scheme-less endpoint such as "minio.internal:9000" cannot be
+// classified by this guard and so is not rejected here, but the SDK then
+// rejects it at the preflight as an invalid URI — it is not a usable
+// configuration either way.
 func endpointIsInsecure(endpoint string) bool {
 	return strings.HasPrefix(strings.ToLower(endpoint), "http://")
 }
