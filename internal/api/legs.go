@@ -1150,7 +1150,7 @@ func (s *Server) HandleInboundCall(call *sipmod.InboundCall) {
 type amdLeg interface {
 	ID() string
 	AppID() string
-	ClearAMDTap()
+	ClearAMDTapIf(w io.Writer) bool
 }
 
 // amdDriver drives an AMD analyzer in push mode. Its Write is installed as the
@@ -1167,6 +1167,11 @@ type amdDriver struct {
 	s        *Server
 	l        amdLeg
 	analyzer *amd.Analyzer
+
+	// tap is the writer this driver installed on the leg. It is written before
+	// the tap is published to the leg and never mutated after, so the
+	// SetAMDTap/go-watch statements that follow supply the happens-before.
+	tap io.Writer
 
 	mu      sync.Mutex
 	beeping bool // classified as machine; now waiting for the voicemail beep
@@ -1255,10 +1260,15 @@ func (d *amdDriver) watch(ctx context.Context, budget time.Duration) {
 	}
 	d.mu.Unlock()
 
+	// Ownership gates the verdict, not just the clear: a later AMD start
+	// replaced the tap, so this analysis was superseded and its frozen state
+	// owns no verdict for the leg.
+	if !d.clearTap() {
+		return
+	}
 	if publish {
 		d.publishResult(det)
 	}
-	d.clearTap()
 }
 
 // publishResult emits the terminal classification at most once, whichever of
@@ -1282,9 +1292,10 @@ func (d *amdDriver) publishBeep(beep amd.BeepResult) {
 	})
 }
 
-// clearTap stops the leg feeding a finished analysis. It takes the leg's own
-// lock, so it is never called while holding d.mu.
-func (d *amdDriver) clearTap() { d.l.ClearAMDTap() }
+// clearTap stops the leg feeding a finished analysis, reporting whether this
+// driver still owned the tap. False means a later AMD start replaced it. It
+// takes the leg's own lock, so it is never called while holding d.mu.
+func (d *amdDriver) clearTap() bool { return d.l.ClearAMDTapIf(d.tap) }
 
 // prepareAMD creates an AMD analyzer and returns a function that, when called,
 // installs the tap and starts the deadline goroutine. The returned function is
@@ -1309,7 +1320,11 @@ func (s *Server) prepareAMD(l *leg.SIPLeg, req *AMDParams) (func(), error) {
 	start := func() {
 		once.Do(func() {
 			// The leg decodes at its native rate; the AMD FSM expects 16 kHz.
-			l.SetAMDTap(mixer.NewResampleWriter(d, l.SampleRate(), mixer.DefaultSampleRate))
+			// Record the writer before installing it, so the driver can prove
+			// ownership of the tap before clearing it or publishing a verdict.
+			w := mixer.NewResampleWriter(d, l.SampleRate(), mixer.DefaultSampleRate)
+			d.tap = w
+			l.SetAMDTap(w)
 			// One timer covers both windows. FeedBeep's own timeout advances
 			// only as frames arrive, so an RTP stall during the beep window
 			// would otherwise leave the tap installed with no timer to remove
