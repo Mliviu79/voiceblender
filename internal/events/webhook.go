@@ -32,9 +32,9 @@ type WebhookRegistry struct {
 	stopOnce      sync.Once
 	stopCh        chan struct{}
 
-	// obs is an optional, non-blocking observer for egress metrics. It is
-	// set once at startup via SetMetricsObserver, before any event can be
-	// published, and read-only thereafter. Nil when no collector is wired.
+	// obs is an optional, non-blocking observer for egress metrics. Guarded by
+	// r.mu: it is attached after construction, when events can already be in
+	// flight — see SetMetricsObserver. Nil when no collector is wired.
 	obs MetricsObserver
 }
 
