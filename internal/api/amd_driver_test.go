@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"io"
 	"sync"
 	"testing"
 	"time"
@@ -15,15 +16,29 @@ import (
 type amdFakeLeg struct {
 	mu      sync.Mutex
 	cleared int
+	// installed mirrors the leg's single AMD tap slot, so a superseded driver
+	// clearing a tap it no longer owns is a no-op here exactly as on a SIPLeg.
+	installed io.Writer
 }
 
 func (l *amdFakeLeg) ID() string    { return "leg-amd" }
 func (l *amdFakeLeg) AppID() string { return "app-amd" }
 
-func (l *amdFakeLeg) ClearAMDTap() {
+func (l *amdFakeLeg) ClearAMDTapIf(w io.Writer) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.installed != w {
+		return false
+	}
+	l.installed = nil
 	l.cleared++
+	return true
+}
+
+func (l *amdFakeLeg) liveTap() io.Writer {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.installed
 }
 
 func (l *amdFakeLeg) clearedCount() int {
@@ -70,8 +85,16 @@ func amdSpeechFrame() []byte { return sineFrame(16000, 440, 20) }
 // amdBeepFrame returns 20 ms of the 1000 Hz voicemail beep tone.
 func amdBeepFrame() []byte { return sineFrame(16000, 1000, 20) }
 
-func newAMDTestDriver(s *Server, l amdLeg, params amd.Params) *amdDriver {
-	return &amdDriver{s: s, l: l, analyzer: amd.New(params)}
+// newAMDTestDriver builds a driver and installs it as the leg's tap. Production
+// wraps the driver in a resampler; here the driver is its own tap writer, which
+// exercises the same identity check.
+func newAMDTestDriver(s *Server, l *amdFakeLeg, params amd.Params) *amdDriver {
+	d := &amdDriver{s: s, l: l, analyzer: amd.New(params)}
+	d.tap = d
+	l.mu.Lock()
+	l.installed = d
+	l.mu.Unlock()
+	return d
 }
 
 // TestAMDDriver_PublishesExactlyOneResultUnderConcurrency drives Feed from the
@@ -181,6 +204,53 @@ func TestAMDDriver_WatchExitsOnLegTeardown(t *testing.T) {
 	}
 	if got := rec.count(events.AMDBeep); got != 0 {
 		t.Errorf("expected no amd.beep for a torn-down leg, got %d", got)
+	}
+}
+
+// TestAMDDriver_SupersededDriverPublishesNothing pins the cross-driver
+// contract: AMD can be started twice on one leg (at answer, then over the API),
+// and the second start replaces the tap. The first driver's state freezes where
+// the frames stopped, so when its budget expires it must neither publish that
+// stale verdict nor rip out the live driver's tap.
+func TestAMDDriver_SupersededDriverPublishesNothing(t *testing.T) {
+	s := newTestServer(t)
+	rec := recordAMDEvents(t, s)
+	l := &amdFakeLeg{}
+
+	params := amd.DefaultParams()
+	params.TotalAnalysisTime = 5000 * time.Millisecond
+
+	d1 := newAMDTestDriver(s, l, params)
+
+	// d1 accumulates 200 ms of silence — no verdict yet.
+	silent := amdSilentFrame()
+	for i := 0; i < 10; i++ {
+		if _, err := d1.Write(silent); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+
+	// A second AMD start supersedes d1, taking over the leg's tap.
+	d2 := newAMDTestDriver(s, l, params)
+
+	// d1's budget expires. It owns nothing now.
+	d1.watch(context.Background(), 0)
+
+	if got := rec.count(events.AMDResult); got != 0 {
+		t.Fatalf("a superseded driver must not publish a verdict, got %d", got)
+	}
+	if l.liveTap() != io.Writer(d2) {
+		t.Fatal("a superseded driver must not clear the live driver's tap")
+	}
+
+	// The live driver still owns the leg and its own budget still publishes.
+	d2.watch(context.Background(), 0)
+
+	if got := rec.count(events.AMDResult); got != 1 {
+		t.Fatalf("expected the live driver to publish exactly 1 amd.result, got %d", got)
+	}
+	if l.liveTap() != nil {
+		t.Error("expected the live driver to clear its own tap once done")
 	}
 }
 
