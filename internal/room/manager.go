@@ -2,6 +2,7 @@ package room
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime/debug"
@@ -53,39 +54,75 @@ func (m *Manager) Create(id, appID string, sampleRate int) (*Room, error) {
 }
 
 // wireMixerPanicHook makes the room's mixer report a participant whose IO
-// loop panicked, so the leg behind it is torn down instead of being left in
-// the room as a live-but-silent call. Must be called for every room the
-// manager owns, right after NewRoom.
+// loop panicked, so whoever owns that participant can tear it down instead of
+// leaving a dead audio path wired into a live room. Must be called for every
+// room the manager owns, right after NewRoom.
 //
-// The hook fires on the panicking mixer goroutine holding no locks, but
-// Hangup blocks on a SIP BYE — so dispatch asynchronously and let that
-// goroutine exit, the same way Delete fans hangups out.
+// The hook fires on the panicking mixer goroutine as its last act before that
+// goroutine exits, so teardown must not run inline: RemoveLeg and DeleteBridge
+// publish on the bus, and WhatsAppLeg.Hangup hands ctx straight to Bye and can
+// block on a non-responsive peer. (SIPLeg.Hangup returns immediately — its BYE
+// is fire-and-forget — but it is not the only implementation.) Dispatch
+// asynchronously, the same way Delete fans its hangups out.
 func (m *Manager) wireMixerPanicHook(r *Room) {
 	roomID := r.ID
 	r.Mixer().SetOnParticipantPanic(func(participantID, loop string) {
-		go m.tearDownPanickedLeg(roomID, participantID, loop)
+		go m.tearDownPanickedParticipant(roomID, participantID, loop)
 	})
+}
+
+// tearDownPanickedParticipant routes a panicking mixer participant to the
+// component that owns it.
+//
+// The mixer's participant map is not leg-only: synthetic bridge endpoints
+// (attachBridge) and the API layer's WebSocket, agent, playback and TTS
+// sources all register there too, and each class is owned — and cleaned up —
+// by something different. Treating every participant as a leg would fabricate
+// leg.left_room, a documented webhook, for IDs that were never legs, while
+// cleaning up nothing that actually leaked.
+func (m *Manager) tearDownPanickedParticipant(roomID, participantID, loop string) {
+	// This runs on its own goroutine, so a panic here — Hangup reaching into
+	// a wedged SIP stack, say — would take the process down. That is the exact
+	// failure this teardown exists to contain, so it must contain its own.
+	defer func() {
+		if rec := recover(); rec != nil {
+			m.log.Error("panic tearing down panicked mixer participant",
+				"room_id", roomID,
+				"participant_id", participantID,
+				"panic", rec,
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+
+	if bridgeID, ok := bridgeIDFromParticipant(participantID); ok {
+		m.tearDownPanickedBridge(roomID, bridgeID, loop)
+		return
+	}
+	if l, ok := m.legMgr.Get(participantID); ok {
+		m.tearDownPanickedLeg(roomID, l, loop)
+		return
+	}
+
+	// A ws/agent/playback/TTS source: owned by the API layer, which the room
+	// package cannot call into. The mixer has already closed the participant's
+	// reader and writer, which is what unblocks those owners — a closed egress
+	// pipe drops a ws client's send loop, a closed playback pipe fails the
+	// player's next write — so each runs its own cleanup and publishes its own
+	// event. There is nothing for the room layer to remove or hang up.
+	m.log.Warn("mixer participant panicked; no leg or bridge owns it",
+		"room_id", roomID,
+		"participant_id", participantID,
+		"loop", loop,
+	)
 }
 
 // tearDownPanickedLeg removes a leg whose mixer IO loop panicked from its
 // room and hangs it up. Further operation of that leg is unsafe: its audio
 // path is gone, so leaving it connected would strand the caller on a deaf,
 // mute call with no operator signal.
-func (m *Manager) tearDownPanickedLeg(roomID, legID, loop string) {
-	// This runs on its own goroutine, so a panic here — Hangup reaching into
-	// a wedged SIP stack, say — would take the process down. That is the exact
-	// failure this teardown exists to contain, so it must contain its own.
-	defer func() {
-		if r := recover(); r != nil {
-			m.log.Error("panic tearing down leg after mixer IO panic",
-				"room_id", roomID,
-				"leg_id", legID,
-				"panic", r,
-				"stack", string(debug.Stack()),
-			)
-		}
-	}()
-
+func (m *Manager) tearDownPanickedLeg(roomID string, l leg.Leg, loop string) {
+	legID := l.ID()
 	m.log.Warn("tearing down leg after mixer IO panic",
 		"room_id", roomID,
 		"leg_id", legID,
@@ -97,11 +134,40 @@ func (m *Manager) tearDownPanickedLeg(roomID, legID, loop string) {
 		m.log.Error("removing panicked leg from room",
 			"room_id", roomID, "leg_id", legID, "error", err)
 	}
-	if l, ok := m.legMgr.Get(legID); ok {
-		if err := l.Hangup(context.Background()); err != nil {
-			m.log.Error("hanging up panicked leg",
-				"room_id", roomID, "leg_id", legID, "error", err)
-		}
+	if err := l.Hangup(context.Background()); err != nil {
+		m.log.Error("hanging up panicked leg",
+			"room_id", roomID, "leg_id", legID, "error", err)
+	}
+}
+
+// tearDownPanickedBridge tears down the whole bridge behind a panicking
+// synthetic bridge participant.
+//
+// Letting the mixer drop the participant is not enough: only detachBridge
+// decrements the room's bridgeRefs, so a dead endpoint would keep
+// mixerShouldRun() true and this room's mixer ticking forever behind an
+// endpoint nobody reads, and the peer room would keep pushing audio into a
+// conduit with no far side. DeleteBridge does the whole job — deregister,
+// detach from both rooms, close both endpoints, publish room.unbridged — and
+// its registry delete is the exactly-once gate for the case where both
+// endpoints panic at once.
+func (m *Manager) tearDownPanickedBridge(roomID, bridgeID, loop string) {
+	m.log.Warn("tearing down bridge after mixer IO panic",
+		"room_id", roomID,
+		"bridge_id", bridgeID,
+		"loop", loop,
+	)
+
+	err := m.DeleteBridge(bridgeID)
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrBridgeNotFound):
+		// The peer endpoint's panic, or a concurrent delete, got there first.
+		m.log.Debug("panicked bridge already torn down",
+			"room_id", roomID, "bridge_id", bridgeID)
+	default:
+		m.log.Error("deleting panicked bridge",
+			"room_id", roomID, "bridge_id", bridgeID, "error", err)
 	}
 }
 

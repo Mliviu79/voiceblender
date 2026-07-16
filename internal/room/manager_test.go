@@ -1,6 +1,7 @@
 package room
 
 import (
+	"errors"
 	"io"
 	"sync"
 	"testing"
@@ -85,6 +86,118 @@ func TestManager_MixerParticipantPanicTearsDownLeg(t *testing.T) {
 		}
 		return false
 	})
+}
+
+// TestManager_NonLegParticipantPanicPublishesNothing pins the gate on the
+// panic hook's leg assumption. Exactly one of the mixer's production
+// registration sites registers a leg; the rest are bridge endpoints and the
+// API layer's ws/agent/playback/TTS sources. Treating a panicking playback
+// source as a leg would publish leg.left_room — a documented webhook — naming
+// an ID that was never a leg and never in the room, while removing and hanging
+// up nothing at all.
+func TestManager_NonLegParticipantPanicPublishesNothing(t *testing.T) {
+	bus := newTestBus()
+	var mu sync.Mutex
+	var eventTypes []events.EventType
+	bus.Subscribe(func(e events.Event) {
+		mu.Lock()
+		eventTypes = append(eventTypes, e.Type)
+		mu.Unlock()
+	})
+
+	legMgr := leg.NewManager()
+	mgr := NewManager(legMgr, bus, newTestLog())
+	if _, err := mgr.Create("r1", "", 0); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	r, _ := mgr.Get("r1")
+
+	// A room playback source, not a leg: "pb-1" is unknown to the leg manager.
+	r.Mixer().AddPlaybackSource("pb-1", panicReader{})
+	r.Mixer().Start()
+	defer r.Mixer().Stop()
+
+	waitFor(t, 2*time.Second, "panicked playback source removed from the mixer", func() bool {
+		return r.Mixer().ParticipantCount() == 0
+	})
+
+	// Let the teardown goroutine run to completion; the publish, if it were
+	// coming, happens on that goroutine after the mixer removal above.
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, et := range eventTypes {
+		if et == events.LegLeftRoom {
+			t.Fatal("leg.left_room published for a playback source that was never a leg")
+		}
+	}
+}
+
+// TestManager_BridgeParticipantPanicTearsDownBridge pins the bridge arm of the
+// panic dispatch. Dropping the participant from this room's mixer is only a
+// fraction of the job: bridgeRefs is decremented solely by detachBridge, so a
+// dead endpoint otherwise keeps mixerShouldRun() true and this room's mixer
+// ticking forever, leaves the bridge in the registry, and strands the peer room
+// writing into a conduit with no far side.
+//
+// The panicking reader stands in for the conduit endpoint's Read blowing up:
+// registering it under the bridge's participant ID is what makes the mixer's
+// real hook fire with a bridge-classed ID.
+func TestManager_BridgeParticipantPanicTearsDownBridge(t *testing.T) {
+	mgr, bus := newBridgeTestManager(t)
+	got, mu := collectEvents(bus)
+	mgr.Create("a", "", 16000)
+	mgr.Create("b", "", 16000)
+	br, err := mgr.CreateBridge("br1", "a", "b", DirectionBidirectional)
+	if err != nil {
+		t.Fatalf("CreateBridge: %v", err)
+	}
+
+	ra, _ := mgr.Get("a")
+	rb, _ := mgr.Get("b")
+	ra.Mixer().AddPlaybackSource(bridgeParticipantID("br1"), panicReader{})
+
+	waitFor(t, 2*time.Second, "panicked bridge deregistered", func() bool {
+		_, ok := mgr.GetBridge("br1")
+		return !ok
+	})
+	waitFor(t, 2*time.Second, "both rooms' mixers to stop after the bridge died", func() bool {
+		ra.mu.RLock()
+		rb.mu.RLock()
+		defer ra.mu.RUnlock()
+		defer rb.mu.RUnlock()
+		return !ra.mixerRunning && !rb.mixerRunning
+	})
+
+	ra.mu.RLock()
+	refsA := ra.bridgeRefs
+	ra.mu.RUnlock()
+	rb.mu.RLock()
+	refsB := rb.bridgeRefs
+	rb.mu.RUnlock()
+	if refsA != 0 || refsB != 0 {
+		t.Errorf("bridgeRefs after panic teardown = (a:%d, b:%d), want (0, 0) — the mixers tick forever otherwise", refsA, refsB)
+	}
+
+	if _, err := br.epA.Write([]byte{0, 0}); !errors.Is(err, io.ErrClosedPipe) {
+		t.Errorf("conduit endpoint should be closed after panic teardown, Write err = %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var sawUnbridged bool
+	for _, e := range *got {
+		if e.Type == events.RoomUnbridged {
+			sawUnbridged = true
+		}
+		if e.Type == events.LegLeftRoom {
+			t.Error("leg.left_room published for a bridge endpoint that was never a leg")
+		}
+	}
+	if !sawUnbridged {
+		t.Error("expected room.unbridged when a bridge endpoint's IO panicked")
+	}
 }
 
 // TestManager_MixerParticipantPanicHangupPanicDoesNotCrash verifies the
