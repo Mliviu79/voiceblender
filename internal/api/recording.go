@@ -108,6 +108,17 @@ func (mc *multiChannelState) stopLeg(legID string, m mixerIface) {
 	fpath := rec.Stop()
 	rec.Wait()
 
+	// Stop reports the path the recording was headed for whether or not it got
+	// there: a capture that failed is discarded, so nothing exists at fpath.
+	// Recording it anyway would hand the merge a path it cannot open, and the
+	// merge fails on the first unreadable input — so one leg's failure would
+	// destroy every other participant's audio too. Leave it out instead; stopAll
+	// reports which legs went missing.
+	if !rec.Published() {
+		mc.log.Error("multi-channel: leg capture was discarded, dropping it from the merge", "leg_id", legID, "file", fpath)
+		return
+	}
+
 	mc.mu.Lock()
 	mc.files[legID] = fpath
 	mc.mu.Unlock()
@@ -133,21 +144,38 @@ func (mc *multiChannelState) stopAll(m mixerIface) (*recording.MultiChannelResul
 	}
 
 	mc.mu.Lock()
-	// Build merge inputs in channel order.
-	inputs := make([]recording.MultiChannelInput, len(mc.participantOrder))
-	for i, legID := range mc.participantOrder {
-		inputs[i] = recording.MultiChannelInput{
-			LegID:      legID,
-			FilePath:   mc.files[legID],
-			JoinOffset: mc.joinOffsets[legID],
+	// Build merge inputs in channel order, over the legs that actually published.
+	// A leg whose capture was discarded has no file to merge; including it would
+	// fail the merge on its first unreadable input and take the whole room's
+	// audio down with it. The survivors are merged and the losses reported, so
+	// the caller can tell a complete recording from a partial one.
+	inputs := make([]recording.MultiChannelInput, 0, len(mc.participantOrder))
+	var omitted []string
+	for _, legID := range mc.participantOrder {
+		fpath, ok := mc.files[legID]
+		if !ok {
+			omitted = append(omitted, legID)
+			continue
 		}
+		inputs = append(inputs, recording.MultiChannelInput{
+			LegID:      legID,
+			FilePath:   fpath,
+			JoinOffset: mc.joinOffsets[legID],
+		})
 	}
 	mc.mu.Unlock()
 
+	// If nothing published, there is no recording to salvage: MergeMultiChannel
+	// refuses an empty input set, which fails the stop loudly rather than
+	// reporting an empty room as a success.
 	result, err := recording.MergeMultiChannel(mc.dir, inputs, totalDuration, mc.sampleRate)
 	if err != nil {
-		mc.log.Error("multi-channel: merge failed", "error", err)
+		mc.log.Error("multi-channel: merge failed", "error", err, "omitted_legs", omitted)
 		return nil, err
+	}
+	result.OmittedLegs = omitted
+	if len(omitted) > 0 {
+		mc.log.Warn("multi-channel: merged without the legs whose captures were discarded", "omitted_legs", omitted)
 	}
 
 	// Upload the merged file if storage backend is set.
@@ -670,6 +698,9 @@ type RecordingStopRoomResult struct {
 	File             string                           `json:"file"`
 	MultiChannelFile string                           `json:"multi_channel_file,omitempty"`
 	Channels         map[string]recording.ChannelInfo `json:"channels,omitempty"`
+	// OmittedLegs names participants whose audio is missing from the merged
+	// file because their capture failed. Absent when the recording is complete.
+	OmittedLegs []string `json:"omitted_legs,omitempty"`
 }
 
 func (s *Server) doStopRecordRoom(roomID string) (*RecordingStopRoomResult, error) {
@@ -689,8 +720,10 @@ func (s *Server) doStopRecordRoom(roomID string) (*RecordingStopRoomResult, erro
 	if mcResult != nil {
 		res.MultiChannelFile = mcResult.FilePath
 		res.Channels = mcResult.Channels
+		res.OmittedLegs = mcResult.OmittedLegs
 		evtData.MultiChannelFile = mcResult.FilePath
 		evtData.Channels = mcResult.Channels
+		evtData.OmittedLegs = mcResult.OmittedLegs
 	}
 	s.Bus.Publish(events.RecordingFinished, evtData)
 	return res, nil

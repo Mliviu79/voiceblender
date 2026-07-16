@@ -31,6 +31,15 @@ type MultiChannelInput struct {
 type MultiChannelResult struct {
 	FilePath string
 	Channels map[string]ChannelInfo
+	// OmittedLegs names participants who took part but are absent from the
+	// merged file, because their capture produced nothing to merge. It is empty
+	// when every participant made it in.
+	//
+	// MergeMultiChannel never sets this: it merges exactly the inputs it is
+	// given and has no way to know a participant was dropped before it was
+	// called. Whoever selects the inputs fills it in, and only that caller can
+	// distinguish a complete recording from a partial one — so it must say.
+	OmittedLegs []string
 }
 
 // MergeMultiChannel reads per-participant mono WAV files and produces a single
