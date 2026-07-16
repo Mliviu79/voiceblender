@@ -293,16 +293,25 @@ type tryReader interface {
 // recordStereo writes a stereo WAV [L0, R0, L1, R1, ...] driven by the right
 // reader's clock.
 //
-// The right channel is the master: it is fed continuously (silence included) by
-// the leg's write loop or the room's mix tick, so each right frame read emits
-// exactly one output slot and the file advances in real time. The left channel
-// is the companion: it is written only when a packet actually arrives, so it is
-// bursty and gap-prone. Reading it in lock-step with the master would park the
-// loop the moment incoming audio stalled, while the master kept being written
-// and silently dropped frames — leaving the two channels permanently skewed for
-// the rest of the call. Instead the companion is drained without blocking into
-// a bounded accumulator, and each slot either pops one companion frame or falls
-// back to silence. The channels therefore stay sample-aligned across a stall.
+// The right channel is the master and must be paced by whoever feeds it: one
+// frame every tick, silence included. Each master frame read emits exactly one
+// output slot, so a paced master advances the file in real time. That is a
+// contract on the producer, not something this loop can enforce, and the two
+// wired producers both have states that break it: a held SIP leg and an
+// outbound DTMF burst each skip the leg's out-tap write, and the room's mix
+// tick skips the out-tap of a deafened or write-only participant. While the
+// master is stalled the recording freezes with it; on resume the companion has
+// been bounded to companionMaxSlots and the older backlog dropped, so the left
+// channel stays that far behind for the rest of the call.
+//
+// The left channel is the companion: it is written only when a packet actually
+// arrives, so it is bursty and gap-prone. Reading it in lock-step with the
+// master would park the loop the moment incoming audio stalled, while the
+// master kept being written and silently dropped frames — leaving the two
+// channels permanently skewed for the rest of the call. Instead the companion
+// is drained without blocking into a bounded accumulator, and each slot either
+// pops one companion frame or falls back to silence. The channels therefore
+// stay sample-aligned across a stall.
 //
 // While paused, interleaved samples are zeroed on both channels.
 //
