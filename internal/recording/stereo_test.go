@@ -347,6 +347,54 @@ func TestRecordStereo_Pause_ZeroesBothChannels(t *testing.T) {
 	}
 }
 
+// TestRecordStereo_ClosedCompanionKeepsRecording pins the item's central
+// semantic change: only the master ends the recording. A companion that closes
+// mid-call must silence-fill for the rest of the timeline rather than cutting
+// the file short, which is what the previous lock-step loop did.
+func TestRecordStereo_ClosedCompanionKeepsRecording(t *testing.T) {
+	const (
+		nSlots     = 20
+		closeAt    = 5
+		compSample = int16(0x1111)
+	)
+
+	left, right := runStereo(t, stereoRate, masterRamp(nSlots, stereoSlotBytes), func(k int, leftPW *syncPipeWriter, _ *Recorder) {
+		// The companion talks for a few slots and then closes for good.
+		switch {
+		case k < closeAt:
+			leftPW.Write(pcmFrame(compSample, stereoSlotBytes))
+		case k == closeAt:
+			leftPW.Close()
+		}
+	})
+
+	// The master ran to its own EOF: the companion closing did not end the file.
+	if want := nSlots * stereoSlotSamples; len(right) != want {
+		t.Fatalf("recorded %d frames, want %d — a closed companion must not end the recording", len(right), want)
+	}
+	if len(left) != len(right) {
+		t.Fatalf("channel lengths differ: left=%d right=%d", len(left), len(right))
+	}
+
+	// The master stream is untouched by the companion's close.
+	for i, s := range right {
+		if want := masterVal(i / stereoSlotSamples); s != want {
+			t.Fatalf("right[%d] = %d, want %d — master audio lost when the companion closed", i, s, want)
+		}
+	}
+
+	// The companion is audible up to the close, then silence-fills in place.
+	for i := 0; i < len(left); i++ {
+		want := int16(0)
+		if i < closeAt*stereoSlotSamples {
+			want = compSample
+		}
+		if left[i] != want {
+			t.Fatalf("left[%d] = %d, want %d — a closed companion must silence-fill", i, left[i], want)
+		}
+	}
+}
+
 func rateName(rate int) string {
 	switch rate {
 	case 8000:
