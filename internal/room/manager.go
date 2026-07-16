@@ -220,10 +220,10 @@ func (m *Manager) Delete(id string) error {
 		go func(l leg.Leg) {
 			defer wg.Done()
 			defer func() {
-				if r := recover(); r != nil {
+				if rec := recover(); rec != nil {
 					m.log.Error("panic hanging up leg during room delete",
 						"leg_id", l.ID(),
-						"panic", r,
+						"panic", rec,
 						"stack", string(debug.Stack()),
 					)
 				}
