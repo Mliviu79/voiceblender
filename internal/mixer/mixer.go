@@ -121,7 +121,7 @@ type Mixer struct {
 	// room layer) finish the teardown the mixer cannot see — the mixer is a
 	// leaf and knows nothing about legs, rooms or events.
 	hookMu             sync.Mutex
-	onParticipantPanic func(participantID, loop string)
+	onParticipantPanic func(p *Participant, loop string)
 
 	// tickPanics counts recovered mixTick panics; tickPanicLastLog is the
 	// unix-nanos of the last one logged. Both drive recoverTick's rate limit
@@ -136,11 +136,18 @@ type Mixer struct {
 // whose readLoop or writeLoop panicked, after the mixer has removed it.
 // loop is "readLoop" or "writeLoop". Passing nil disables the hook.
 //
+// fn receives the participant instance that panicked, not just its ID. By the
+// time fn — or anything it defers to — acts, the same ID may already carry a
+// replacement instance over a live audio path, and the mixer has removed the
+// panicked one from its own map, so this pointer is the only remaining handle
+// on which instance died. An owner that keyed teardown on the ID would tear
+// down that replacement instead.
+//
 // The mixer holds no lock — neither m.mu nor hookMu — while invoking fn, so
 // fn may call back into the mixer. fn runs on the panicking goroutine as its
 // last act before exiting; if fn does anything that blocks, it must hand off
 // to its own goroutine.
-func (m *Mixer) SetOnParticipantPanic(fn func(participantID, loop string)) {
+func (m *Mixer) SetOnParticipantPanic(fn func(p *Participant, loop string)) {
 	m.hookMu.Lock()
 	defer m.hookMu.Unlock()
 	m.onParticipantPanic = fn
@@ -364,7 +371,11 @@ func (m *Mixer) ClearParticipantOutTap(id string) {
 	}
 }
 
-func (m *Mixer) AddParticipant(id string, reader io.Reader, writer io.Writer) {
+// AddParticipant registers id's audio path and returns the instance created
+// for it. Callers that must later distinguish this instance from a
+// replacement registered under the same ID — see removeParticipantIf — keep
+// the returned pointer; the rest may ignore it.
+func (m *Mixer) AddParticipant(id string, reader io.Reader, writer io.Writer) *Participant {
 	gw := &guardedWriter{w: writer}
 	p := &Participant{
 		ID:       id,
@@ -390,6 +401,7 @@ func (m *Mixer) AddParticipant(id string, reader io.Reader, writer io.Writer) {
 
 	go m.readLoop(p)
 	go m.writeLoop(p)
+	return p
 }
 
 // AddPlaybackSource adds a read-only source into the mix (e.g. audio file).
@@ -589,7 +601,7 @@ func (m *Mixer) recoverParticipant(p *Participant, loop string) {
 			hook := m.onParticipantPanic
 			m.hookMu.Unlock()
 			if hook != nil {
-				hook(p.ID, loop)
+				hook(p, loop)
 			}
 		}
 	}
