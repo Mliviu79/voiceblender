@@ -1228,6 +1228,18 @@ Stop recording a leg.
 }
 ```
 
+| Field | Type | Description |
+|-------|------|-------------|
+| `file` | string | Path/URI of the recording. Omitted entirely when the capture was discarded and no file was written — see below. |
+
+A capture that fails mid-write, or that never captures a frame, is discarded:
+nothing is written and no file exists. The stop still succeeds with
+`status: stopped` — the recording did stop — but the response carries no `file`
+key at all, and the `recording.finished` event carries `"file": ""`. Treat
+either as "there is no recording to fetch", not as a path: it is the one case
+where a `200` produces no artefact. A present, non-empty `file` always names
+something that exists.
+
 **Errors:** `404` — No recording in progress
 
 ---
@@ -2120,7 +2132,7 @@ Multi-channel recording — includes a single multi-channel WAV with channel met
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `file` | string | Path/URI of the full mix recording (mono) |
+| `file` | string | Path/URI of the full mix recording (mono). Omitted entirely when the full-mix capture was discarded and no file was written. |
 | `multi_channel_file` | string | Path/URI of the multi-channel WAV file. Only present when `multi_channel: true` was used. |
 | `channels` | object | Map of leg ID to channel metadata. Only present when `multi_channel: true` was used. |
 | `channels[].channel` | integer | Zero-based channel index in the multi-channel WAV |
@@ -2135,7 +2147,18 @@ that were lost are named in `omitted_legs`. Those leg IDs have no entry in
 is only meaningful via `channels`, never by position. If **every** participant's
 capture fails there is nothing to merge, and the response carries neither
 `multi_channel_file` nor `channels` (the failure is logged server-side; the stop
-itself still succeeds and returns the full-mix `file`).
+itself still succeeds).
+
+The full mix is captured independently of the per-participant ones, so it can be
+discarded on its own: a capture that fails mid-write, or that never captures a
+frame, writes no file. When that happens the response omits the `file` key
+entirely (the `recording.finished` event instead carries `"file": ""`), while
+`multi_channel_file` and `channels` may still be present and usable. The stop
+still reports `status: stopped`. An absent `file` means there is no full mix to
+fetch, not a path; a present, non-empty `file` always names something real. In
+the worst case both the full mix and every per-participant capture are
+discarded, and the stop succeeds carrying none of `file`,
+`multi_channel_file`, or `channels`.
 
 Whether a partial recording is acceptable is the caller's decision, so check
 `omitted_legs` before treating `multi_channel_file` as a complete record of the

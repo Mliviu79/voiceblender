@@ -5164,7 +5164,6 @@ components:
                     type: string
             required:
                 - status
-                - file
         RecordingStopRoomResult:
             type: object
             properties:
@@ -5184,7 +5183,6 @@ components:
                         type: string
             required:
                 - status
-                - file
         RegistrationView:
             type: object
             properties:
