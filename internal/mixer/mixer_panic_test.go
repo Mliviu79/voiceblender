@@ -151,8 +151,8 @@ func TestMixer_WriteLoopPanicRemovesParticipant(t *testing.T) {
 	fsz := m.frameSizeBytes
 
 	gotLoop := make(chan string, 4)
-	m.SetOnParticipantPanic(func(id, loop string) {
-		if id == "victim" {
+	m.SetOnParticipantPanic(func(p *Participant, loop string) {
+		if p.ID == "victim" {
 			gotLoop <- loop
 		}
 	})
@@ -321,8 +321,8 @@ func TestMixer_ParticipantPanicHookFires(t *testing.T) {
 
 	type call struct{ id, loop string }
 	calls := make(chan call, 4)
-	m.SetOnParticipantPanic(func(id, loop string) {
-		calls <- call{id, loop}
+	m.SetOnParticipantPanic(func(p *Participant, loop string) {
+		calls <- call{p.ID, loop}
 	})
 
 	victimReader := &panicAfterReader{limit: 1, frame: make([]byte, m.frameSizeBytes)}
@@ -349,10 +349,10 @@ func TestMixer_ParticipantPanicHookFiresExactlyOnce(t *testing.T) {
 	m := New(testLog(), DefaultSampleRate)
 
 	var fired atomic.Int32
-	m.SetOnParticipantPanic(func(id, loop string) {
+	m.SetOnParticipantPanic(func(p *Participant, loop string) {
 		fired.Add(1)
-		if id != "victim" {
-			t.Errorf("hook participant id = %q, want victim", id)
+		if p.ID != "victim" {
+			t.Errorf("hook participant id = %q, want victim", p.ID)
 		}
 	})
 
@@ -477,7 +477,7 @@ func TestMixer_StaleLoopPanicDoesNotEvictSuccessor(t *testing.T) {
 	m := New(testLog(), DefaultSampleRate)
 
 	var fired atomic.Int32
-	m.SetOnParticipantPanic(func(id, loop string) {
+	m.SetOnParticipantPanic(func(p *Participant, loop string) {
 		fired.Add(1)
 	})
 

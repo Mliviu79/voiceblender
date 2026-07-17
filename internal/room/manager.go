@@ -11,6 +11,7 @@ import (
 	"github.com/VoiceBlender/voiceblender/internal/bridge"
 	"github.com/VoiceBlender/voiceblender/internal/events"
 	"github.com/VoiceBlender/voiceblender/internal/leg"
+	"github.com/VoiceBlender/voiceblender/internal/mixer"
 	"github.com/google/uuid"
 )
 
@@ -115,8 +116,8 @@ func (m *Manager) Create(id, appID string, sampleRate int) (*Room, error) {
 // asynchronously, the same way Delete fans its hangups out.
 func (m *Manager) wireMixerPanicHook(r *Room) {
 	roomID := r.ID
-	r.Mixer().SetOnParticipantPanic(func(participantID, loop string) {
-		go m.tearDownPanickedParticipant(roomID, participantID, loop)
+	r.Mixer().SetOnParticipantPanic(func(p *mixer.Participant, loop string) {
+		go m.tearDownPanickedParticipant(roomID, p, loop)
 	})
 }
 
@@ -129,7 +130,9 @@ func (m *Manager) wireMixerPanicHook(r *Room) {
 // by something different. Treating every participant as a leg would fabricate
 // leg.left_room, a documented webhook, for IDs that were never legs, while
 // cleaning up nothing that actually leaked.
-func (m *Manager) tearDownPanickedParticipant(roomID, participantID, loop string) {
+func (m *Manager) tearDownPanickedParticipant(roomID string, p *mixer.Participant, loop string) {
+	participantID := p.ID
+
 	// This runs on its own goroutine, so a panic here — Hangup reaching into
 	// a wedged SIP stack, say — would take the process down. That is the exact
 	// failure this teardown exists to contain, so it must contain its own.
@@ -149,7 +152,7 @@ func (m *Manager) tearDownPanickedParticipant(roomID, participantID, loop string
 		return
 	}
 	if l, ok := m.legMgr.Get(participantID); ok {
-		m.tearDownPanickedLeg(roomID, l, loop)
+		m.tearDownPanickedLeg(roomID, l, p, loop)
 		return
 	}
 
@@ -170,19 +173,44 @@ func (m *Manager) tearDownPanickedParticipant(roomID, participantID, loop string
 // room and hangs it up. Further operation of that leg is unsafe: its audio
 // path is gone, so leaving it connected would strand the caller on a deaf,
 // mute call with no operator signal.
-func (m *Manager) tearDownPanickedLeg(roomID string, l leg.Leg, loop string) {
+//
+// p is the participant instance that panicked, and teardown is elected on it,
+// not on the leg's presence in roomID. This runs on its own goroutine, so the
+// leg may since have moved rooms, or left and returned to roomID, and be live
+// on a fresh participant; the leg would then still be a member here and a
+// membership-keyed election would hang up that healthy call and report it as
+// a mixer panic. RemoveLegIfParticipant resolves the identity and removes
+// under the room's lock in one step, so nothing lands in between.
+//
+// Removing nothing means the panicked path is already detached — by a move,
+// a room delete, or an API removal — and each of those owns its own teardown.
+// This path then does nothing at all: no hangup, no event, no hook.
+func (m *Manager) tearDownPanickedLeg(roomID string, l leg.Leg, p *mixer.Participant, loop string) {
 	legID := l.ID()
+
+	r, ok := m.Get(roomID)
+	if !ok {
+		m.log.Debug("room of panicked leg already deleted",
+			"room_id", roomID, "leg_id", legID)
+		return
+	}
+	if !r.RemoveLegIfParticipant(legID, p) {
+		m.log.Debug("panicked leg's audio path already replaced or detached",
+			"room_id", roomID, "leg_id", legID, "loop", loop)
+		return
+	}
+
 	m.log.Warn("tearing down leg after mixer IO panic",
 		"room_id", roomID,
 		"leg_id", legID,
 		"loop", loop,
 	)
 
-	// Removes the leg from the room and publishes leg.left_room.
-	if err := m.RemoveLeg(roomID, legID); err != nil {
-		m.log.Error("removing panicked leg from room",
-			"room_id", roomID, "leg_id", legID, "error", err)
-	}
+	// RemoveLegIfParticipant did the removal RemoveLeg would have; this is the
+	// event that goes with it.
+	m.bus.Publish(events.LegLeftRoom, &events.LegLeftRoomData{
+		LegRoomScope: events.LegRoomScope{LegID: legID, RoomID: roomID, AppID: l.AppID()},
+	})
 	if err := l.Hangup(context.Background()); err != nil {
 		m.log.Error("hanging up panicked leg",
 			"room_id", roomID, "leg_id", legID, "error", err)
