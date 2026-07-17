@@ -1202,6 +1202,7 @@ type amdDriver struct {
 	mu      sync.Mutex
 	beeping bool // classified as machine; now waiting for the voicemail beep
 	done    bool // terminal state reached; later frames are ignored
+	pending bool // machine verdict resolving its tap ownership; watch defers to it
 }
 
 // Write feeds decoded PCM into the analyzer. It runs on the leg's readLoop, so
@@ -1239,28 +1240,48 @@ func (d *amdDriver) Write(p []byte) (int, error) {
 	// A machine verdict with beep detection enabled keeps the tap installed
 	// through the beep window; every other verdict is terminal.
 	waitBeep := det.Result == amd.ResultMachine && d.analyzer.Params().BeepTimeout > 0
-	d.beeping = waitBeep
-	d.done = !waitBeep
-	d.mu.Unlock()
-
-	// Ownership gates the verdict, not just the clear: the readLoop snapshots
-	// the tap and releases the leg's lock before writing, so a frame in flight
-	// can reach a superseded driver after a later AMD start replaced the tap.
-	// That analysis owns no verdict for the leg. A terminal verdict claims
-	// ownership by clearing the tap; a machine verdict keeps the tap for the
-	// beep window, so it checks ownership without clearing.
-	if waitBeep {
-		if !d.ownsTap() {
-			d.mu.Lock()
-			d.done = true
-			d.beeping = false
-			d.mu.Unlock()
+	if !waitBeep {
+		d.done = true
+		d.mu.Unlock()
+		// A terminal verdict claims ownership by clearing the tap: the readLoop
+		// snapshots the tap and releases the leg's lock before writing, so a
+		// frame in flight can reach a superseded driver after a later AMD start
+		// replaced the tap, and that analysis owns no verdict for the leg.
+		if !d.clearTap() {
 			return len(p), nil
 		}
-	} else if !d.clearTap() {
+		d.publishResult(det)
 		return len(p), nil
 	}
+	// A machine verdict keeps the tap installed for the beep window, so it gates
+	// its publish on ownership without clearing. pending marks the window
+	// between here and that publish: if watch's deadline fires in it, watch
+	// leaves the tap and the publish to this goroutine rather than clearing the
+	// tap — which would sink the ownership check below — or publishing twice.
+	d.beeping = true
+	d.pending = true
+	d.mu.Unlock()
+
+	owns := d.ownsTap()
+
+	d.mu.Lock()
+	d.pending = false
+	deadlinePassed := d.done
+	if !owns {
+		// A later AMD start replaced the tap; this analysis owns no verdict.
+		d.done = true
+		d.beeping = false
+		d.mu.Unlock()
+		return len(p), nil
+	}
+	d.mu.Unlock()
+
 	d.publishResult(det)
+	if deadlinePassed {
+		// watch's deadline fired while this verdict was resolving and deferred
+		// the tap to it; the beep window is over, so end the analysis now.
+		d.clearTap()
+	}
 	return len(p), nil
 }
 
@@ -1289,6 +1310,14 @@ func (d *amdDriver) watch(ctx context.Context, budget time.Duration) {
 		return
 	}
 	d.done = true
+	if d.pending {
+		// The readLoop reached a machine verdict and is still resolving its tap
+		// ownership. The beep window is over, but clearing the tap here would
+		// sink that ownership check and drop the verdict, so leave the tap and
+		// the publish to it.
+		d.mu.Unlock()
+		return
+	}
 	// Mid-beep-window the classification was already published and only the
 	// beep is outstanding, so the budget expiring means no beep arrived.
 	publish := !d.beeping
@@ -1309,9 +1338,10 @@ func (d *amdDriver) watch(ctx context.Context, budget time.Duration) {
 	}
 }
 
-// publishResult emits the terminal classification. Its caller is elected by the
-// done flag under d.mu, whichever of the readLoop or watch reaches it first, so
-// exactly one amd.result is emitted per call.
+// publishResult emits the terminal classification. Exactly one amd.result is
+// emitted per call: the done flag under d.mu elects a single deadline-or-
+// terminal publisher, and the pending handshake hands a machine verdict's
+// publish to the readLoop alone.
 func (d *amdDriver) publishResult(det amd.Detection) {
 	d.s.Bus.Publish(events.AMDResult, &events.AMDResultData{
 		LegScope:           events.LegScope{LegID: d.l.ID(), AppID: d.l.AppID()},
