@@ -1538,6 +1538,16 @@ func (l *SIPLeg) ClearAMDTapIf(w io.Writer) bool {
 	return true
 }
 
+// OwnsAMDTap reports whether w is the AMD tap currently installed, without
+// clearing it. A machine verdict keeps its tap installed through the beep
+// window, so it gates its publish on ownership through this check rather than
+// the clearing ClearAMDTapIf.
+func (l *SIPLeg) OwnsAMDTap(w io.Writer) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.amdTap == w
+}
+
 // SetSpeakingTap sets a writer that receives decoded incoming PCM for
 // voice activity detection.
 func (l *SIPLeg) SetSpeakingTap(w io.Writer) {
