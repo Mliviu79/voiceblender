@@ -28,6 +28,14 @@ const (
 	wavFormatUlaw = 7
 )
 
+// Accepted WAV sample rate range. Rates below 50 Hz yield zero samples per
+// ptime and would divide by zero when sizing frames; the upper bound caps the
+// per-frame buffer allocated for a caller-supplied file.
+const (
+	minWAVSampleRate = 8000
+	maxWAVSampleRate = 192000
+)
+
 // Player manages audio playback to an io.Writer (PCM stream).
 type Player struct {
 	mu      sync.Mutex
@@ -602,6 +610,10 @@ func parseWAVHeader(r io.Reader) (*wavHeader, error) {
 
 	if h.NumChannels != 1 && h.NumChannels != 2 {
 		return nil, fmt.Errorf("unsupported channel count: %d", h.NumChannels)
+	}
+
+	if h.SampleRate < minWAVSampleRate || h.SampleRate > maxWAVSampleRate {
+		return nil, fmt.Errorf("unsupported sample rate: %d (supported: %d-%d Hz)", h.SampleRate, minWAVSampleRate, maxWAVSampleRate)
 	}
 
 	return h, nil
