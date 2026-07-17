@@ -45,17 +45,19 @@ func (p Params) Validate() error {
 	// A window that a verdict cannot be reached within silently defeats that
 	// verdict: every call on the leg falls out as not_sure. Comparing against
 	// the raw threshold is not enough. fsmState.step advances one frame at a
-	// time, so a threshold is only crossed at the first frame boundary at or
-	// past it; step also runs its hard-deadline check *before* the phase switch
-	// that emits a verdict, so the deadline must fall strictly after that
-	// frame. Hence each bound is the earliest firing frame plus one.
-	if p.TotalAnalysisTime < analysisFrames(p.InitialSilenceTimeout)+frameDuration {
+	// time, so a verdict fires at the first frame boundary at or past its
+	// threshold — a fixed elapsed we call the verdict frame. step runs its
+	// hard-deadline check *before* the phase switch that emits the verdict, so
+	// the verdict only survives when the deadline falls strictly after that
+	// frame. Hence each verdict is reachable exactly when TotalAnalysisTime is
+	// strictly greater than its verdict frame, and we reject at or below it.
+	if p.TotalAnalysisTime <= analysisFrames(p.InitialSilenceTimeout) {
 		return errors.New("total_analysis_time is too short to ever reach no_speech (initial_silence_timeout)")
 	}
 	// Speech latches only after speechOnFrames voiced frames, and greetingDur
 	// starts counting at that frame, so the greeting lags the stream by
 	// speechOnFrames-1 frames.
-	if p.TotalAnalysisTime < analysisFrames(p.GreetingDuration)+speechOnFrames*frameDuration {
+	if p.TotalAnalysisTime <= analysisFrames(p.GreetingDuration)+(speechOnFrames-1)*frameDuration {
 		return errors.New("total_analysis_time is too short to ever reach machine (greeting_duration)")
 	}
 	// A burst must survive the off-debounce to end, and those trailing silent
@@ -65,7 +67,7 @@ func (p Params) Validate() error {
 	if burst < speechOffFrames*frameDuration {
 		burst = speechOffFrames * frameDuration
 	}
-	if p.TotalAnalysisTime < burst+speechOnFrames*frameDuration+analysisFrames(p.AfterGreetingSilence) {
+	if p.TotalAnalysisTime <= burst+(speechOnFrames-1)*frameDuration+analysisFrames(p.AfterGreetingSilence) {
 		return errors.New("total_analysis_time is too short to ever reach human (after_greeting_silence)")
 	}
 	return nil
