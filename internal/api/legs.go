@@ -1196,10 +1196,12 @@ func (d *amdDriver) Write(p []byte) (int, error) {
 		d.done = true
 		d.mu.Unlock()
 
+		if !d.clearTap() {
+			return len(p), nil
+		}
 		if beep.Detected {
 			d.publishBeep(beep)
 		}
-		d.clearTap()
 		return len(p), nil
 	}
 
@@ -1215,10 +1217,14 @@ func (d *amdDriver) Write(p []byte) (int, error) {
 	d.done = !waitBeep
 	d.mu.Unlock()
 
-	d.publishResult(det)
-	if !waitBeep {
-		d.clearTap()
+	// Ownership gates the verdict, not just the clear: the readLoop snapshots
+	// the tap and releases the leg's lock before writing, so a frame in flight
+	// can reach a superseded driver after a later AMD start replaced the tap.
+	// That analysis owns no verdict for the leg.
+	if !waitBeep && !d.clearTap() {
+		return len(p), nil
 	}
+	d.publishResult(det)
 	return len(p), nil
 }
 
