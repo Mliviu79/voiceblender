@@ -42,18 +42,38 @@ func (p Params) Validate() error {
 	if p.BeepTimeout < 0 {
 		return errors.New("beep_timeout must not be negative")
 	}
-	if p.TotalAnalysisTime < p.InitialSilenceTimeout {
-		return errors.New("total_analysis_time must be >= initial_silence_timeout")
+	// A window that a verdict cannot be reached within silently defeats that
+	// verdict: every call on the leg falls out as not_sure. Comparing against
+	// the raw threshold is not enough. fsmState.step advances one frame at a
+	// time, so a threshold is only crossed at the first frame boundary at or
+	// past it; step also runs its hard-deadline check *before* the phase switch
+	// that emits a verdict, so the deadline must fall strictly after that
+	// frame. Hence each bound is the earliest firing frame plus one.
+	if p.TotalAnalysisTime < analysisFrames(p.InitialSilenceTimeout)+frameDuration {
+		return errors.New("total_analysis_time is too short to ever reach no_speech (initial_silence_timeout)")
 	}
-	// A greeting or after-greeting window longer than the whole analysis window
-	// can never be reached, silently defeating the machine/human verdict.
-	if p.TotalAnalysisTime < p.GreetingDuration {
-		return errors.New("total_analysis_time must be >= greeting_duration")
+	// Speech latches only after speechOnFrames voiced frames, and greetingDur
+	// starts counting at that frame, so the greeting lags the stream by
+	// speechOnFrames-1 frames.
+	if p.TotalAnalysisTime < analysisFrames(p.GreetingDuration)+speechOnFrames*frameDuration {
+		return errors.New("total_analysis_time is too short to ever reach machine (greeting_duration)")
 	}
-	if p.TotalAnalysisTime < p.AfterGreetingSilence {
-		return errors.New("total_analysis_time must be >= after_greeting_silence")
+	// A burst must survive the off-debounce to end, and those trailing silent
+	// frames still accrue to currentSpeech, so no burst is shorter than
+	// speechOffFrames — even when MinimumWordLength is.
+	burst := analysisFrames(p.MinimumWordLength)
+	if burst < speechOffFrames*frameDuration {
+		burst = speechOffFrames * frameDuration
+	}
+	if p.TotalAnalysisTime < burst+speechOnFrames*frameDuration+analysisFrames(p.AfterGreetingSilence) {
+		return errors.New("total_analysis_time is too short to ever reach human (after_greeting_silence)")
 	}
 	return nil
+}
+
+// analysisFrames rounds d up to a whole number of analysis frames.
+func analysisFrames(d time.Duration) time.Duration {
+	return (d + frameDuration - 1) / frameDuration * frameDuration
 }
 
 // MergeMillis builds Params by starting from defaults, then overriding with
