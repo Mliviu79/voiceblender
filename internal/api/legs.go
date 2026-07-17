@@ -1176,6 +1176,7 @@ type amdLeg interface {
 	ID() string
 	AppID() string
 	ClearAMDTapIf(w io.Writer) bool
+	OwnsAMDTap(w io.Writer) bool
 }
 
 // amdDriver drives an AMD analyzer in push mode. Its Write is installed as the
@@ -1245,8 +1246,18 @@ func (d *amdDriver) Write(p []byte) (int, error) {
 	// Ownership gates the verdict, not just the clear: the readLoop snapshots
 	// the tap and releases the leg's lock before writing, so a frame in flight
 	// can reach a superseded driver after a later AMD start replaced the tap.
-	// That analysis owns no verdict for the leg.
-	if !waitBeep && !d.clearTap() {
+	// That analysis owns no verdict for the leg. A terminal verdict claims
+	// ownership by clearing the tap; a machine verdict keeps the tap for the
+	// beep window, so it checks ownership without clearing.
+	if waitBeep {
+		if !d.ownsTap() {
+			d.mu.Lock()
+			d.done = true
+			d.beeping = false
+			d.mu.Unlock()
+			return len(p), nil
+		}
+	} else if !d.clearTap() {
 		return len(p), nil
 	}
 	d.publishResult(det)
@@ -1322,6 +1333,12 @@ func (d *amdDriver) publishBeep(beep amd.BeepResult) {
 // driver still owned the tap. False means a later AMD start replaced it. It
 // takes the leg's own lock, so it is never called while holding d.mu.
 func (d *amdDriver) clearTap() bool { return d.l.ClearAMDTapIf(d.tap) }
+
+// ownsTap reports whether this driver still owns the leg's tap without clearing
+// it, so a machine verdict can gate its publish on ownership yet keep the tap
+// installed for the beep window. It takes the leg's own lock, so it is never
+// called while holding d.mu.
+func (d *amdDriver) ownsTap() bool { return d.l.OwnsAMDTap(d.tap) }
 
 // prepareAMD creates an AMD analyzer and returns a function that, when called,
 // installs the tap and starts the deadline goroutine. The returned function is
