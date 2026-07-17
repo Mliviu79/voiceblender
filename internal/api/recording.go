@@ -133,8 +133,10 @@ func (mc *multiChannelState) stopLeg(legID string, m mixerIface) {
 	// Recording it anyway would hand the merge a path it cannot open, and the
 	// merge fails on the first unreadable input — so one leg's failure would
 	// destroy every other participant's audio too. Leave it out instead; stopAll
-	// reports which legs went missing.
-	if !rec.Published() {
+	// reports which legs went missing. Finalized, not Published, is the gate: a
+	// recording whose only failure was the closing directory sync is present and
+	// readable at fpath and belongs in the merge.
+	if !rec.Finalized() {
 		mc.log.Error("multi-channel: leg capture was discarded, dropping it from the merge", "leg_id", legID, "file", fpath)
 		return
 	}
@@ -450,9 +452,11 @@ func (s *Server) stopLegRecording(legID string) (string, bool) {
 	// Stop reports the path the capture was headed for whether or not it got
 	// there: a discarded capture leaves nothing at fpath, so there is no file to
 	// upload and none to name. Report the stop without a location rather than
-	// hand the caller a path that cannot be opened.
+	// hand the caller a path that cannot be opened. Finalized, not Published, is
+	// the gate: a capture whose only failure was the closing directory sync is
+	// present and readable at fpath, so it is still reported and uploaded.
 	var location string
-	if !rec.Published() {
+	if !rec.Finalized() {
 		s.Log.Error("leg capture was discarded, stopping without a file", "leg_id", legID, "file", fpath)
 	} else {
 		// Upload to storage backend if not plain file.
@@ -707,7 +711,9 @@ func (s *Server) cleanupRoomRecording(id string) (location string, mcResult *rec
 	// A discarded capture leaves nothing at fpath — see stopLegRecording. The
 	// stop still succeeded, and any multi-channel result stands on its own, so
 	// report it without a location rather than as "no recording in progress".
-	if !rec.Published() {
+	// Finalized, not Published, is the gate: a capture whose only failure was the
+	// closing directory sync is present and readable at fpath.
+	if !rec.Finalized() {
 		s.Log.Error("room mix capture was discarded, stopping without a file", "room_id", id, "file", fpath)
 		return "", mcResult, true
 	}

@@ -29,6 +29,7 @@ type Recorder struct {
 	cancel    context.CancelFunc
 	filePath  string
 	published bool
+	finalized bool
 	done      chan struct{}
 	log       *slog.Logger
 	paused    atomic.Bool
@@ -138,6 +139,7 @@ func (r *Recorder) initRecording(ctx context.Context, dir string) (*stagedFile, 
 	r.recording = true
 	r.filePath = fpath
 	r.published = false
+	r.finalized = false
 	r.done = make(chan struct{})
 	r.mu.Unlock()
 
@@ -165,12 +167,25 @@ func (r *Recorder) finish(staged *stagedFile, wrote bool, recErr error) {
 		discardTemp(staged.f, staged.tmpPath)
 		return
 	}
-	if err := publishFile(staged.f, staged.tmpPath, staged.finalPath); err != nil {
-		r.log.Error("publish recording", "error", err, "file", staged.finalPath)
-		return
+	err := publishFile(staged.f, staged.tmpPath, staged.finalPath)
+	// publishFile drops the staging file and leaves nothing at the final path
+	// for any failure up to and including the rename, but the rename is its
+	// point of no return: a failure after it (the closing directory sync) leaves
+	// a complete, readable recording at the final path that is merely not known
+	// to survive a crash. A file present there is the signal that the rename
+	// landed, so the recording is finalized even when publishFile still errors.
+	finalized := err == nil
+	if err != nil {
+		if _, statErr := os.Stat(staged.finalPath); statErr == nil {
+			finalized = true
+			r.log.Warn("recording published with degraded durability", "error", err, "file", staged.finalPath)
+		} else {
+			r.log.Error("publish recording", "error", err, "file", staged.finalPath)
+		}
 	}
 	r.mu.Lock()
-	r.published = true
+	r.finalized = finalized
+	r.published = err == nil
 	r.mu.Unlock()
 }
 
@@ -218,11 +233,28 @@ func (r *Recorder) IsRecording() bool {
 //
 // False means "do not rely on this path", not "this path is provably empty":
 // a publish that failed only at the closing directory sync leaves the recording
-// present at its final name and still reports false.
+// present at its final name and still reports false. Finalized separates that
+// case, and is what callers deciding whether a usable file exists should check.
 func (r *Recorder) Published() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.published
+}
+
+// Finalized reports whether the recording's bytes reached the path Stop returns
+// — the staging file was fully written and renamed there, so a complete,
+// readable recording exists at that path. Unlike Published it stays true when
+// the publish failed only at the closing directory sync: the file is present
+// and readable, merely not known to survive a crash, which is a durability
+// concern rather than a corrupt-file one. A capture that wrote no frame, errored
+// mid-write, or failed its header rewrite is discarded and reports false here
+// too, because no file was renamed into place. Callers deciding whether a usable
+// recording exists — to report it or hand it on — check this rather than
+// Published, which demands the stronger durability guarantee.
+func (r *Recorder) Finalized() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.finalized
 }
 
 // Pause instructs the recorder to replace incoming audio with silence
