@@ -42,7 +42,7 @@ func startRoomWithRecording(t *testing.T, s *Server, roomID, legID string) func(
 	if err := s.RoomMgr.AddLeg(roomID, legID); err != nil {
 		t.Fatalf("AddLeg: %v", err)
 	}
-	if _, err := s.doStartRecordRoom(roomID, RecordRequest{}); err != nil {
+	if _, err := s.doStartRecordRoom(t.Context(), roomID, RecordRequest{}); err != nil {
 		t.Fatalf("start room recording: %v", err)
 	}
 
