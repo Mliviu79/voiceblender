@@ -900,9 +900,9 @@ func (s *Server) stopRoomRecordingIfEmpty(roomID string) {
 // finalizeRoomRecording stops the room's recording and publishes
 // recording.finished, reporting whether there was one to stop.
 //
-// appID is a parameter rather than looked up here because the room may already
-// be gone: deleting a room finalizes its recording after the room itself has
-// been removed from the manager, and a lookup at that point returns nothing.
+// appID is a parameter rather than looked up here because every caller already
+// holds it: room delete snapshots it alongside the participants, and the
+// empty-room path already has the room in hand.
 func (s *Server) finalizeRoomRecording(roomID, appID, why string) bool {
 	location, mcResult, ok := s.cleanupRoomRecording(roomID)
 	if !ok {
