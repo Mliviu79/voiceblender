@@ -110,7 +110,7 @@ func TestManager_StalePanicTeardownSparesLegThatLeftAndReturned(t *testing.T) {
 	legMgr := leg.NewManager()
 	mgr := NewManager(legMgr, bus, newTestLog())
 	var notified int
-	mgr.SetOnLegPanicTeardown(func(l leg.Leg, reason string) { notified++ })
+	mgr.SetOnLegPanicTeardown(func(l leg.Leg, roomID, reason string) { notified++ })
 
 	for _, id := range []string{"r1", "r2"} {
 		if _, err := mgr.Create(id, "", 0); err != nil {
@@ -217,7 +217,7 @@ func TestManager_PanicTeardownStillTearsDownTheLiveInstance(t *testing.T) {
 	legMgr := leg.NewManager()
 	mgr := NewManager(legMgr, bus, newTestLog())
 	var notified []string
-	mgr.SetOnLegPanicTeardown(func(l leg.Leg, reason string) { notified = append(notified, reason) })
+	mgr.SetOnLegPanicTeardown(func(l leg.Leg, roomID, reason string) { notified = append(notified, reason) })
 
 	if _, err := mgr.Create("r1", "", 0); err != nil {
 		t.Fatalf("Create: %v", err)

@@ -27,7 +27,7 @@ type Manager struct {
 	// following a mixer IO panic. hookMu guards it alone — never take it and
 	// m.mu together, and never call the hook under either.
 	hookMu             sync.Mutex
-	onLegPanicTeardown func(l leg.Leg, reason string)
+	onLegPanicTeardown func(l leg.Leg, roomID, reason string)
 }
 
 // legPanicReason is the disconnect reason reported for a leg torn down after
@@ -48,7 +48,11 @@ const legPanicReason = "mixer_panic"
 //
 // The manager holds no lock while invoking fn. fn runs on the teardown
 // goroutine inside its recover(), so a panicking callback is contained.
-func (m *Manager) SetOnLegPanicTeardown(fn func(l leg.Leg, reason string)) {
+//
+// fn receives the room the leg was removed from. The removal has already
+// cleared the leg's own RoomID, so the hook is the only place that still knows
+// it — without it the owner cannot run the room-scoped half of the teardown.
+func (m *Manager) SetOnLegPanicTeardown(fn func(l leg.Leg, roomID, reason string)) {
 	m.hookMu.Lock()
 	defer m.hookMu.Unlock()
 	m.onLegPanicTeardown = fn
@@ -56,7 +60,7 @@ func (m *Manager) SetOnLegPanicTeardown(fn func(l leg.Leg, reason string)) {
 
 // legPanicTeardownHook snapshots the hook under hookMu and returns it, so the
 // caller can invoke it with no lock held.
-func (m *Manager) legPanicTeardownHook() func(l leg.Leg, reason string) {
+func (m *Manager) legPanicTeardownHook() func(l leg.Leg, roomID, reason string) {
 	m.hookMu.Lock()
 	defer m.hookMu.Unlock()
 	return m.onLegPanicTeardown
@@ -218,10 +222,11 @@ func (m *Manager) tearDownPanickedLeg(roomID string, l leg.Leg, p *mixer.Partici
 
 	// Tell the owner, if one registered. RemoveLeg and Hangup above keep the
 	// room layer self-sufficient with no hook installed; the owner adds the
-	// leg-scoped teardown the room package cannot reach — the CDR, the span,
-	// the per-leg webhook and the leg manager entry.
+	// teardown the room package cannot reach — the CDR, the span, the per-leg
+	// webhook and the leg manager entry, plus the room-scoped cleanup that
+	// hangs off roomID (the room agent and the room recording).
 	if fn := m.legPanicTeardownHook(); fn != nil {
-		fn(l, legPanicReason)
+		fn(l, roomID, legPanicReason)
 	}
 }
 

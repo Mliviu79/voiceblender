@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"io"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/VoiceBlender/voiceblender/internal/agent"
 	"github.com/VoiceBlender/voiceblender/internal/events"
 )
 
@@ -88,5 +90,109 @@ func TestPanickedLegPublishesDisconnect(t *testing.T) {
 	// GET /v1/legs/{id} keeps serving it.
 	if _, ok := s.LegMgr.Get("panic-leg"); ok {
 		t.Fatal("panicked leg still registered in the leg manager")
+	}
+}
+
+// stoppableProvider is a do-nothing agent.Provider that records whether Stop
+// was called, standing in for a live vendor session on a room agent.
+type stoppableProvider struct {
+	mu      sync.Mutex
+	stopped bool
+}
+
+func (p *stoppableProvider) Start(context.Context, io.Reader, io.Writer, string,
+	agent.Options, agent.Callbacks) error {
+	return nil
+}
+func (p *stoppableProvider) Stop() {
+	p.mu.Lock()
+	p.stopped = true
+	p.mu.Unlock()
+}
+func (p *stoppableProvider) Running() bool          { return false }
+func (p *stoppableProvider) ConversationID() string { return "" }
+func (p *stoppableProvider) InjectMessage(context.Context, string) error {
+	return nil
+}
+
+func (p *stoppableProvider) wasStopped() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.stopped
+}
+
+// TestPanickedLastLegRunsRoomScopedCleanup pins the room-scoped half of the
+// mixer-panic teardown.
+//
+// The room layer clears the leg's RoomID as part of removing it, so by the time
+// the API hook runs, cleanupLeg's room block no longer fires. Every other
+// leg-removal path reaches the room-scoped cleanup through that block, which
+// left the panic path as the only one that skipped it: the room's agent stayed
+// in roomAgents with its vendor session live, against a room with no legs left.
+// Nothing reaps it — Manager.Delete has one caller, DELETE /v1/rooms/{id} — so
+// a billed websocket stayed open until someone deleted the room by hand.
+//
+// The hook now carries the roomID for exactly this reason.
+func TestPanickedLastLegRunsRoomScopedCleanup(t *testing.T) {
+	const roomID = "r-panic-cleanup"
+
+	s := newTestServer(t)
+
+	if _, err := s.RoomMgr.Create(roomID, "", 0); err != nil {
+		t.Fatalf("Create room: %v", err)
+	}
+
+	// Stand a room agent up directly in the registry: the assertion is about
+	// the teardown path, not about how the agent got there.
+	prov := &stoppableProvider{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelled := make(chan struct{})
+	go func() { <-ctx.Done(); close(cancelled) }()
+
+	roomAgents.Lock()
+	roomAgents.m[roomID] = &agentInfo{
+		session:  prov,
+		sourceID: "agent-" + roomID,
+		roomID:   roomID,
+		cancel:   cancel,
+	}
+	roomAgents.Unlock()
+	t.Cleanup(func() {
+		roomAgents.Lock()
+		delete(roomAgents.m, roomID)
+		roomAgents.Unlock()
+		cancel()
+	})
+
+	l := &panicAudioLeg{apiMockLeg: &apiMockLeg{id: "panic-last-leg", createdAt: time.Now()}}
+	s.LegMgr.Add(l)
+	if err := s.RoomMgr.AddLeg(roomID, "panic-last-leg"); err != nil {
+		t.Fatalf("AddLeg: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		roomAgents.Lock()
+		_, still := roomAgents.m[roomID]
+		roomAgents.Unlock()
+		if !still {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("room agent still registered after the room's last leg died " +
+				"in a mixer IO panic: its vendor session leaks until the room is " +
+				"deleted by hand")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if !prov.wasStopped() {
+		t.Fatal("room agent deregistered but its vendor session was never stopped")
+	}
+
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("room agent's context was never cancelled")
 	}
 }
