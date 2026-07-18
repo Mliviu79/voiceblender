@@ -894,17 +894,23 @@ func (s *Server) stopRoomRecordingIfEmpty(roomID string) {
 		return
 	}
 
+	s.finalizeRoomRecording(roomID, rm.AppID, "empty room")
+}
+
+// finalizeRoomRecording stops the room's recording and publishes
+// recording.finished, reporting whether there was one to stop.
+//
+// appID is a parameter rather than looked up here because the room may already
+// be gone: deleting a room finalizes its recording after the room itself has
+// been removed from the manager, and a lookup at that point returns nothing.
+func (s *Server) finalizeRoomRecording(roomID, appID, why string) bool {
 	location, mcResult, ok := s.cleanupRoomRecording(roomID)
 	if !ok {
-		return
+		return false
 	}
 
-	roomAppID := ""
-	if rm, ok := s.RoomMgr.Get(roomID); ok {
-		roomAppID = rm.AppID
-	}
 	evtData := &events.RecordingFinishedData{
-		LegRoomScope: events.LegRoomScope{RoomID: roomID, AppID: roomAppID},
+		LegRoomScope: events.LegRoomScope{RoomID: roomID, AppID: appID},
 		File:         location,
 	}
 	if mcResult != nil {
@@ -913,7 +919,8 @@ func (s *Server) stopRoomRecordingIfEmpty(roomID string) {
 		evtData.OmittedLegs = mcResult.OmittedLegs
 	}
 	s.Bus.Publish(events.RecordingFinished, evtData)
-	s.Log.Info("auto-stopped room recording (empty room)", "room_id", roomID, "file", location)
+	s.Log.Info("auto-stopped room recording", "room_id", roomID, "file", location, "reason", why)
+	return true
 }
 
 // onLegJoinedRoomRecording starts a per-participant recording if multi-channel
