@@ -543,13 +543,14 @@ func TestManager_PanickedLegNotifiesOwner(t *testing.T) {
 
 	type notice struct {
 		leg    leg.Leg
+		roomID string
 		reason string
 	}
 	var mu sync.Mutex
 	var notices []notice
-	mgr.SetOnLegPanicTeardown(func(l leg.Leg, reason string) {
+	mgr.SetOnLegPanicTeardown(func(l leg.Leg, roomID, reason string) {
 		mu.Lock()
-		notices = append(notices, notice{leg: l, reason: reason})
+		notices = append(notices, notice{leg: l, roomID: roomID, reason: reason})
 		mu.Unlock()
 	})
 
